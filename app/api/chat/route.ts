@@ -41,7 +41,7 @@ export async function POST(req: Request) {
     const { data, error } = await supabase.rpc("match_document_chunks", {
       query_embedding: queryEmbedding,
       match_document_id: "skeletal-muscle-growth",
-      match_count: 5,
+      match_count: 3,
       match_threshold: 0.5,
     });
 
