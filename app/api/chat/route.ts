@@ -75,6 +75,12 @@ Rules:
 - If the answer is not contained in the chunks, say explicitly: "I don't have enough information in this document to answer that." Do not use outside knowledge and do not guess.
 - When you use a chunk, cite the page number in parentheses, e.g. "(page 4)".
 - Never invent a page number or a claim not present in the chunks below.
+- When multiple chunks contain relevant findings, synthesize across all of
+  them rather than answering from a single chunk. Prefer specific
+  quantitative findings (percentages, durations, sample sizes) over vague
+  paraphrase when the chunks contain them.
+- If the question is broad, structure the answer to cover the distinct
+  findings present in the retrieved chunks, not just the first one.
 
 Context chunks:
 ${contextBlock}`;
