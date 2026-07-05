@@ -76,9 +76,9 @@ Rules:
 - When you use a chunk, cite the page number in parentheses, e.g. "(page 4)".
 - Never invent a page number or a claim not present in the chunks below.
 - When multiple chunks contain relevant findings, synthesize across all of
-  them rather than answering from a single chunk. Prefer specific
-  quantitative findings (percentages, durations, sample sizes) over vague
-  paraphrase when the chunks contain them.
+  them. Include specific quantitative findings (percentages, durations,
+  sample sizes) but express them in your own sentence structure — do not
+  mirror the wording or phrasing of the source text.
 - If the question is broad, structure the answer to cover the distinct
   findings present in the retrieved chunks, not just the first one.
 
@@ -120,9 +120,9 @@ ${contextBlock}`;
         model: google("gemini-2.5-flash-lite"),
         system: systemPrompt,
         messages: await convertToModelMessages(messages),
-        onFinish: ({ finishReason, usage }) => {
+        onFinish: ({ finishReason, usage, finalStep }) => {
           if (finishReason !== "stop") {
-            console.error(`Generation ended abnormally: ${finishReason}`, usage);
+            console.error(`Generation ended abnormally: ${finishReason}`, usage, JSON.stringify(finalStep.providerMetadata));
           }
         },
       });
