@@ -15,6 +15,14 @@ const CHUNK_WORD_TARGET = 500;
 const CHUNK_WORD_OVERLAP = 50;
 const MAX_EMBED_RETRIES = 5;
 
+// Hard ceiling on a single "sentence" fragment. Real prose sentences run
+// 10-40 words. Anything past this is not a sentence — it's PDF extraction
+// garbage (missing punctuation, merged columns, a run-on the regex failed
+// to split). Without this cap, one pathological fragment can reproduce the
+// exact 700-1200 word overshoot bug this file was rewritten to fix, just
+// at the sentence level instead of the paragraph level.
+const MAX_SENTENCE_WORDS = 150;
+
 interface CliArgs {
   filePath: string;
   documentId: string;
@@ -92,7 +100,7 @@ async function extractPages(filePath: string): Promise<PageText[]> {
   }
 }
 
-// ---------- Chunking (paragraph-aware, word-based, with overlap) ----------
+// ---------- Chunking (paragraph-aware, sentence-safe, word-based, with overlap) ----------
 
 interface Paragraph {
   pageNumber: number;
@@ -126,6 +134,33 @@ function splitIntoParagraphs(pages: PageText[]): Paragraph[] {
   return paragraphs;
 }
 
+// This PDF's 2-column academic layout does not survive pdf-parse extraction
+// with clean double-newline paragraph breaks. splitIntoParagraphs's regex
+// then fails silently: instead of raising an error, it just hands back a
+// small number of "paragraphs" that are actually several real paragraphs
+// glued together. The original version of this function appended an entire
+// paragraph's words to the buffer BEFORE checking the flush condition, so a
+// single one of these merged blobs could blow straight past
+// CHUNK_WORD_TARGET by 2-3x before anything stopped it — confirmed in
+// production data as 700-1200 word chunks against a 500-word target.
+//
+// Fix: check the flush condition at sentence granularity, not paragraph
+// granularity. A merged 1000-word "paragraph" is still made of ~40-word
+// sentences, so checking after each sentence bounds the overshoot to
+// ~1 sentence's length instead of ~1 paragraph's length. MAX_SENTENCE_WORDS
+// then catches the residual case where even a "sentence" (extraction
+// garbage with no usable punctuation) is itself pathologically long, by
+// force-splitting it into fixed-size word windows rather than trusting
+// punctuation at all.
+function splitLongFragment(words: string[], maxWords: number): string[][] {
+  if (words.length <= maxWords) return [words];
+  const windows: string[][] = [];
+  for (let i = 0; i < words.length; i += maxWords) {
+    windows.push(words.slice(i, i + maxWords));
+  }
+  return windows;
+}
+
 function chunkParagraphs(paragraphs: Paragraph[]): Chunk[] {
   const chunks: Chunk[] = [];
   let currentWords: string[] = [];
@@ -156,15 +191,31 @@ function chunkParagraphs(paragraphs: Paragraph[]): Chunk[] {
       currentHeading = activeHeading;
     }
 
-    const words = paragraph.text.split(/\s+/).filter(Boolean);
-    currentWords.push(...words);
+    // Split at sentence granularity so a single oversized "paragraph"
+    // (merged by a bad PDF extraction) can't blow past target in one shot.
+    const sentences = paragraph.text.split(/(?<=[.?!])\s+/).filter(Boolean);
 
-    if (currentWords.length >= CHUNK_WORD_TARGET) {
-      flush();
-      const overlapWords = currentWords.slice(-CHUNK_WORD_OVERLAP);
-      currentWords = [...overlapWords];
-      currentPageNumber = paragraph.pageNumber;
-      currentHeading = activeHeading;
+    for (const sentence of sentences) {
+      const rawWords = sentence.split(/\s+/).filter(Boolean);
+
+      // Hard guard: force-split any single fragment longer than
+      // MAX_SENTENCE_WORDS into fixed-size word windows. This is the
+      // backstop for extraction garbage that has no punctuation to
+      // split on at all — without it, one malformed "sentence" can
+      // still reproduce the original overshoot bug.
+      const wordGroups = splitLongFragment(rawWords, MAX_SENTENCE_WORDS);
+
+      for (const words of wordGroups) {
+        currentWords.push(...words);
+
+        if (currentWords.length >= CHUNK_WORD_TARGET) {
+          flush();
+          const overlapWords = currentWords.slice(-CHUNK_WORD_OVERLAP);
+          currentWords = [...overlapWords];
+          currentPageNumber = paragraph.pageNumber;
+          currentHeading = activeHeading;
+        }
+      }
     }
   }
 
@@ -278,7 +329,7 @@ async function main(): Promise<void> {
 
   const paragraphs = splitIntoParagraphs(pages);
   const chunks = chunkParagraphs(paragraphs);
-  console.log(`Built ${chunks.length} chunks (target ${CHUNK_WORD_TARGET} words, ${CHUNK_WORD_OVERLAP} word overlap).`);
+  console.log(`Built ${chunks.length} chunks (target ${CHUNK_WORD_TARGET} words, ${CHUNK_WORD_OVERLAP} word overlap, ${MAX_SENTENCE_WORDS} word sentence cap).`);
 
   const existingIndices = await getExistingChunkIndices(documentId);
   console.log(`${existingIndices.size} chunks already ingested. ${chunks.length - existingIndices.size} remaining.`);
