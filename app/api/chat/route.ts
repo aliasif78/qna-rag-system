@@ -114,6 +114,11 @@ ${contextBlock}`;
         model: google("gemini-2.5-flash-lite"),
         system: systemPrompt,
         messages: await convertToModelMessages(messages),
+        onFinish: ({ finishReason, usage }) => {
+          if (finishReason !== "stop") {
+            console.error(`Generation ended abnormally: ${finishReason}`, usage);
+          }
+        },
       });
 
       // toUIMessageStream() adapts the raw model stream (text-delta events,
