@@ -5,6 +5,20 @@ import { supabase } from "@/lib/supabase/client";
 
 export const maxDuration = 30;
 
+// Retrieval cutoff: chunks below this never make it into context at all.
+// This lives in the RPC call (see match_document_chunks below).
+const RETRIEVAL_THRESHOLD = 0.5;
+
+// Confidence cutoff: separate from retrieval. A chunk can clear
+// RETRIEVAL_THRESHOLD and still not be similar enough to trust as a
+// grounded answer. Chunks between these two thresholds are shown to the
+// model AND flagged to the client as low-confidence, instead of being
+// treated identically to a strong match. This value is unvalidated against
+// a real eval set — treat it as a starting point, not a tuned constant.
+const CONFIDENCE_THRESHOLD = 0.65;
+
+const NO_CONTEXT_MESSAGE = "I don't have enough information in this document to answer that.";
+
 interface RetrievedChunk {
   id: number;
   content: string;
@@ -42,7 +56,7 @@ export async function POST(req: Request) {
       query_embedding: queryEmbedding,
       match_document_id: "skeletal-muscle-growth",
       match_count: 3,
-      match_threshold: 0.5,
+      match_threshold: RETRIEVAL_THRESHOLD,
     });
 
     if (error) {
@@ -67,20 +81,50 @@ export async function POST(req: Request) {
     return new Response("Internal error.", { status: 500 });
   }
 
-  const contextBlock = chunks.length > 0 ? chunks.map((c, i) => `[Chunk ${i + 1} — page ${c.pageNumber}]\n${c.content}`).join("\n\n") : "(No chunks were retrieved above the similarity threshold for this query.)";
+  // Hard gate: nothing cleared RETRIEVAL_THRESHOLD. Do not call the model at
+  // all. Refusal here is a code-level guarantee, not a prompt instruction the
+  // model could choose to ignore, and it saves a generation call we already
+  // know should refuse.
+  if (chunks.length === 0) {
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        writer.write({ type: "data-citations", data: { chunks: [], lowConfidence: false } });
+
+        const id = crypto.randomUUID();
+        writer.write({ type: "text-start", id });
+        writer.write({ type: "text-delta", id, delta: NO_CONTEXT_MESSAGE });
+        writer.write({ type: "text-end", id });
+      },
+    });
+    return createUIMessageStreamResponse({ stream });
+  }
+
+  const maxSimilarity = Math.max(...chunks.map((c) => c.similarity));
+  const lowConfidence = maxSimilarity < CONFIDENCE_THRESHOLD;
+
+  const contextBlock = chunks.map((c, i) => `[Chunk ${i + 1} — page ${c.pageNumber}]\n${c.content}`).join("\n\n");
 
   const systemPrompt = `You answer questions about a document on skeletal muscle growth using ONLY the context chunks provided below.
 
 Rules:
-- If the answer is not contained in the chunks, say explicitly: "I don't have enough information in this document to answer that." Do not use outside knowledge and do not guess.
+- If the answer is not contained in the chunks, say explicitly: "${NO_CONTEXT_MESSAGE}" Do not use outside knowledge and do not guess.
 - When you use a chunk, cite the page number in parentheses, e.g. "(page 4)".
 - Never invent a page number or a claim not present in the chunks below.
+- Before citing any quantitative finding (a percentage, duration, sample
+  size, or count), verify it directly answers the specific quantity the
+  question asked for — not merely a related or nearby metric from the same
+  chunk. Muscle mass/volume change is not the same metric as myofibril
+  number or size. Study duration is not the same as sample size. If the
+  chunks only contain a distinct-but-related metric, say so explicitly
+  ("the document reports X, but does not report Y") rather than presenting
+  the related number as if it were the answer.
 - When multiple chunks contain relevant findings, synthesize across all of
-  them. Include specific quantitative findings (percentages, durations,
-  sample sizes) but express them in your own sentence structure — do not
-  mirror the wording or phrasing of the source text.
+  them. Include specific quantitative findings but express them in your own
+  sentence structure — do not mirror the wording or phrasing of the source
+  text.
 - If the question is broad, structure the answer to cover the distinct
   findings present in the retrieved chunks, not just the first one.
+${lowConfidence ? `- The retrieved chunks are only weakly similar to this question (below the confidence threshold). Treat this as a signal the document may not directly address what was asked. Be conservative: if the chunks don't squarely answer the question, say so rather than stretching them to fit.` : ""}
 
 Context chunks:
 ${contextBlock}`;
@@ -108,7 +152,7 @@ ${contextBlock}`;
       // (before createUIMessageStream was even called).
       writer.write({
         type: "data-citations",
-        data: { chunks },
+        data: { chunks, lowConfidence },
       });
 
       // Starts the actual LLM generation. streamText() does not block here —
