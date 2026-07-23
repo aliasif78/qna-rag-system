@@ -3,10 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { JetBrains_Mono, Inter } from "next/font/google";
-
-const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono", weight: ["400", "500", "700"] });
-const sans = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
 interface CitationChunk {
   id: number;
@@ -73,7 +69,7 @@ export default function Home() {
   const busy = status === "streaming" || status === "submitted";
 
   return (
-    <div className={`${mono.variable} ${sans.variable} relative flex h-screen flex-col overflow-hidden bg-black`}>
+    <div className={`relative flex h-screen flex-col overflow-hidden bg-black`}>
       {/* ---------- Aurora + starfield background ---------- */}
       <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
         <div className="aurora aurora-a" />
