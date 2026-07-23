@@ -1,8 +1,8 @@
-"use client";
+'use client';
 
-import { useEffect, useRef, useState } from "react";
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { useEffect, useRef, useState } from 'react';
+import { useChat } from '@ai-sdk/react';
+import { DefaultChatTransport } from 'ai';
 
 interface CitationChunk {
   id: number;
@@ -38,35 +38,38 @@ function useStars(count: number) {
   }));
 }
 
-const EXAMPLE_PROMPTS = ["What triggers hypertrophy at the cellular level?", "How does mechanical tension differ from metabolic stress?", "What role does protein synthesis play in recovery?"];
+const EXAMPLE_PROMPTS = ['What triggers hypertrophy at the cellular level?', 'How does mechanical tension differ from metabolic stress?', 'What role does protein synthesis play in recovery?'];
 
 export default function Home() {
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const stars = useStars(90);
 
   const { messages, sendMessage, status, error } = useChat({
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport: new DefaultChatTransport({ api: '/api/chat' }),
   });
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: 'smooth',
+    });
   }, [messages, status]);
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || status === "streaming" || status === "submitted") return;
+    if (!trimmed || status === 'streaming' || status === 'submitted') return;
     sendMessage({ text: trimmed });
-    setInput("");
+    setInput('');
   }
 
   function handleExample(prompt: string) {
-    if (status === "streaming" || status === "submitted") return;
+    if (status === 'streaming' || status === 'submitted') return;
     sendMessage({ text: prompt });
   }
 
-  const busy = status === "streaming" || status === "submitted";
+  const busy = status === 'streaming' || status === 'submitted';
 
   return (
     <div className={`relative flex h-screen flex-col overflow-hidden bg-black`}>
@@ -97,10 +100,10 @@ export default function Home() {
       {/* ---------- Header ---------- */}
       <header className="relative z-10 flex items-center justify-between border-b border-white/10 bg-black/40 px-6 py-4 backdrop-blur-sm">
         <div>
-          <p className="mono text-[11px] uppercase tracking-[0.2em] text-sky-400/80">RAG · Grounded Answers</p>
+          <p className="mono text-[11px] tracking-[0.2em] text-sky-400/80 uppercase">RAG · Grounded Answers</p>
           <h1 className="sans mt-0.5 text-lg font-semibold text-white">Skeletal Muscle Growth — Document Q&A</h1>
         </div>
-        <div className="mono flex items-center gap-2 text-[11px] uppercase tracking-wide text-white/50">
+        <div className="mono flex items-center gap-2 text-[11px] tracking-wide text-white/50 uppercase">
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-60" />
             <span className="relative inline-flex h-2 w-2 rounded-full bg-sky-400" />
@@ -126,15 +129,18 @@ export default function Home() {
           )}
 
           {messages.map((message) => {
-            const isUser = message.role === "user";
+            const isUser = message.role === 'user';
             return (
-              <div key={message.id} className={`fade-up flex flex-col ${isUser ? "items-end" : "items-start"}`}>
-                <span className={`mono mb-1.5 text-[10px] uppercase tracking-[0.15em] ${isUser ? "text-orange-400/70" : "text-sky-400/70"}`}>{isUser ? "You" : "Assistant"}</span>
+              <div key={message.id} className={`fade-up flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+                <span className={`mono mb-1.5 text-[10px] tracking-[0.15em] uppercase ${isUser ? 'text-orange-400/70' : 'text-sky-400/70'}`}>{isUser ? 'You' : 'Assistant'}</span>
 
-                <div className={`max-w-[85%] space-y-3 ${isUser ? "" : "w-full"}`}>
+                <div className={`max-w-[85%] space-y-3 ${isUser ? '' : 'w-full'}`}>
                   {message.parts.map((part, i) => {
-                    if (part.type === "data-citations") {
-                      const { chunks, lowConfidence } = part.data as { chunks: CitationChunk[]; lowConfidence: boolean };
+                    if (part.type === 'data-citations') {
+                      const { chunks, lowConfidence } = part.data as {
+                        chunks: CitationChunk[];
+                        lowConfidence: boolean;
+                      };
                       return (
                         <div key={i} className="rounded-lg border border-white/10 bg-white/3 p-3.5 backdrop-blur-sm">
                           {chunks.length === 0 ? (
@@ -150,7 +156,7 @@ export default function Home() {
                                   Low-confidence match — retrieved passages are only weakly similar to this question. Treat this answer with extra scrutiny.
                                 </p>
                               )}
-                              <p className="mono mb-2.5 text-[10px] uppercase tracking-[0.15em] text-white/40">Sources</p>
+                              <p className="mono mb-2.5 text-[10px] tracking-[0.15em] text-white/40 uppercase">Sources</p>
                               <ul className="space-y-3">
                                 {chunks.map((c) => (
                                   <li key={c.id} className="text-xs">
@@ -159,7 +165,12 @@ export default function Home() {
                                       <span>{c.similarity.toFixed(3)}</span>
                                     </div>
                                     <div className="mb-1.5 h-1 w-full overflow-hidden rounded-full bg-white/10">
-                                      <div className="h-full rounded-full bg-linear-to-r from-sky-400 to-orange-400" style={{ width: `${Math.min(c.similarity * 100, 100)}%` }} />
+                                      <div
+                                        className="h-full rounded-full bg-linear-to-r from-sky-400 to-orange-400"
+                                        style={{
+                                          width: `${Math.min(c.similarity * 100, 100)}%`,
+                                        }}
+                                      />
                                     </div>
                                     <p className="sans line-clamp-2 text-white/60">{c.content}</p>
                                   </li>
@@ -171,9 +182,9 @@ export default function Home() {
                       );
                     }
 
-                    if (part.type === "text") {
+                    if (part.type === 'text') {
                       return (
-                        <p key={i} className={`sans whitespace-pre-wrap rounded-2xl px-4 py-3 text-[15px] leading-relaxed ${isUser ? "border border-orange-400/20 bg-orange-400/8 text-white" : "border border-sky-400/15 bg-white/3 text-white/90"}`}>
+                        <p key={i} className={`sans rounded-2xl px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap ${isUser ? 'border border-orange-400/20 bg-orange-400/8 text-white' : 'border border-sky-400/15 bg-white/3 text-white/90'}`}>
                           {part.text}
                         </p>
                       );
@@ -186,13 +197,13 @@ export default function Home() {
             );
           })}
 
-          {status === "submitted" && (
+          {status === 'submitted' && (
             <div className="fade-up flex items-center gap-2 pl-1">
               <span className="mono text-xs text-white/40">Retrieving and generating</span>
               <span className="flex gap-1">
-                <span className="dot" style={{ animationDelay: "0s" }} />
-                <span className="dot" style={{ animationDelay: "0.15s" }} />
-                <span className="dot" style={{ animationDelay: "0.3s" }} />
+                <span className="dot" style={{ animationDelay: '0s' }} />
+                <span className="dot" style={{ animationDelay: '0.15s' }} />
+                <span className="dot" style={{ animationDelay: '0.3s' }} />
               </span>
             </div>
           )}
@@ -208,8 +219,8 @@ export default function Home() {
       {/* ---------- Input ---------- */}
       <form onSubmit={handleSubmit} className="relative z-10 border-t border-white/10 bg-black/40 px-4 py-4 backdrop-blur-sm">
         <div className="mx-auto flex max-w-2xl gap-2">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about skeletal muscle growth…" className="sans flex-1 rounded-lg border border-white/15 bg-white/3 px-4 py-2.5 text-[15px] text-white placeholder:text-white/30 outline-none transition-colors focus:border-sky-400/50 focus:bg-white/3" disabled={busy} />
-          <button type="submit" disabled={busy || !input.trim()} className="mono rounded-lg border border-sky-400/30 bg-sky-400/10 px-5 py-2.5 text-sm font-medium text-sky-300 transition-all hover:bg-sky-400/20 disabled:opacity-30 disabled:hover:bg-sky-400/10">
+          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about skeletal muscle growth…" className="sans flex-1 rounded-lg border border-white/15 bg-white/3 px-4 py-2.5 text-[15px] text-white transition-colors outline-none placeholder:text-white/30 focus:border-sky-400/50 focus:bg-white/3" disabled={busy} />
+          <button type="submit" disabled={busy || !input.trim()} className="mono cursor-pointer rounded-lg border border-sky-400/30 bg-sky-400/10 px-5 py-2.5 text-sm font-medium text-sky-300 transition-all hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-sky-400/10">
             Send
           </button>
         </div>

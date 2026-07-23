@@ -1,5 +1,5 @@
-import { createBrowserClient } from "@supabase/ssr";
-import { getSupabaseKeys } from "./get-supabase-keys";
+import { createBrowserClient } from '@supabase/ssr';
+import { getSupabaseKeys } from './get-supabase-keys';
 
 // Publishable key, not the secret key. This client is safe to use in an API
 // route (server) and safe to ship to the browser if you ever need client-side

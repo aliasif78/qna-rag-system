@@ -1,7 +1,7 @@
-import { createUIMessageStream, createUIMessageStreamResponse, streamText, convertToModelMessages, UIMessage, toUIMessageStream } from "ai";
-import { google } from "@ai-sdk/google";
-import { embedQuery, QueryEmbeddingError } from "@/lib/ai/embed-query";
-import { supabase } from "@/lib/supabase/client";
+import { createUIMessageStream, createUIMessageStreamResponse, streamText, convertToModelMessages, UIMessage, toUIMessageStream } from 'ai';
+import { google } from '@ai-sdk/google';
+import { embedQuery, QueryEmbeddingError } from '@/lib/ai/embed-query';
+import { supabase } from '@/lib/supabase/client';
 
 export const maxDuration = 30;
 
@@ -32,18 +32,18 @@ export async function POST(req: Request) {
   const { messages }: { messages: UIMessage[] } = await req.json();
 
   const lastMessage = messages[messages.length - 1];
-  if (!lastMessage || lastMessage.role !== "user") {
-    return new Response("Last message must be from the user.", { status: 400 });
+  if (!lastMessage || lastMessage.role !== 'user') {
+    return new Response('Last message must be from the user.', { status: 400 });
   }
 
   const userText = lastMessage.parts
-    .filter((p) => p.type === "text")
+    .filter((p) => p.type === 'text')
     .map((p) => p.text)
-    .join(" ")
+    .join(' ')
     .trim();
 
   if (!userText) {
-    return new Response("Message has no text content.", { status: 400 });
+    return new Response('Message has no text content.', { status: 400 });
   }
 
   // Everything in this block runs BEFORE the stream opens. If any of it
@@ -52,16 +52,16 @@ export async function POST(req: Request) {
   try {
     const queryEmbedding = await embedQuery(userText);
 
-    const { data, error } = await supabase.rpc("match_document_chunks", {
+    const { data, error } = await supabase.rpc('match_document_chunks', {
       query_embedding: queryEmbedding,
-      match_document_id: "skeletal-muscle-growth",
+      match_document_id: 'skeletal-muscle-growth',
       match_count: 3,
       match_threshold: RETRIEVAL_THRESHOLD,
     });
 
     if (error) {
-      console.error("match_document_chunks RPC failed:", error.message);
-      return new Response("Retrieval failed.", { status: 500 });
+      console.error('match_document_chunks RPC failed:', error.message);
+      return new Response('Retrieval failed.', { status: 500 });
     }
 
     chunks = (data ?? []).map((row: { id: number; content: string; page_number: number; chunk_index: number; section_heading: string | null; similarity: number }) => ({
@@ -74,11 +74,11 @@ export async function POST(req: Request) {
     }));
   } catch (err) {
     if (err instanceof QueryEmbeddingError) {
-      const status = err.kind === "rate_limited" ? 429 : err.kind === "quota_exhausted" ? 503 : 500;
+      const status = err.kind === 'rate_limited' ? 429 : err.kind === 'quota_exhausted' ? 503 : 500;
       return new Response(err.message, { status });
     }
-    console.error("Unexpected retrieval error:", err);
-    return new Response("Internal error.", { status: 500 });
+    console.error('Unexpected retrieval error:', err);
+    return new Response('Internal error.', { status: 500 });
   }
 
   // Hard gate: nothing cleared RETRIEVAL_THRESHOLD. Do not call the model at
@@ -88,12 +88,12 @@ export async function POST(req: Request) {
   if (chunks.length === 0) {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
-        writer.write({ type: "data-citations", data: { chunks: [], lowConfidence: false } });
+        writer.write({ type: 'data-citations', data: { chunks: [], lowConfidence: false } });
 
         const id = crypto.randomUUID();
-        writer.write({ type: "text-start", id });
-        writer.write({ type: "text-delta", id, delta: NO_CONTEXT_MESSAGE });
-        writer.write({ type: "text-end", id });
+        writer.write({ type: 'text-start', id });
+        writer.write({ type: 'text-delta', id, delta: NO_CONTEXT_MESSAGE });
+        writer.write({ type: 'text-end', id });
       },
     });
     return createUIMessageStreamResponse({ stream });
@@ -102,7 +102,7 @@ export async function POST(req: Request) {
   const maxSimilarity = Math.max(...chunks.map((c) => c.similarity));
   const lowConfidence = maxSimilarity < CONFIDENCE_THRESHOLD;
 
-  const contextBlock = chunks.map((c, i) => `[Chunk ${i + 1} — page ${c.pageNumber}]\n${c.content}`).join("\n\n");
+  const contextBlock = chunks.map((c, i) => `[Chunk ${i + 1} — page ${c.pageNumber}]\n${c.content}`).join('\n\n');
 
   const systemPrompt = `You answer questions about a document on skeletal muscle growth using ONLY the context chunks provided below.
 
@@ -124,7 +124,7 @@ Rules:
   text.
 - If the question is broad, structure the answer to cover the distinct
   findings present in the retrieved chunks, not just the first one.
-${lowConfidence ? `- The retrieved chunks are only weakly similar to this question (below the confidence threshold). Treat this as a signal the document may not directly address what was asked. Be conservative: if the chunks don't squarely answer the question, say so rather than stretching them to fit.` : ""}
+${lowConfidence ? `- The retrieved chunks are only weakly similar to this question (below the confidence threshold). Treat this as a signal the document may not directly address what was asked. Be conservative: if the chunks don't squarely answer the question, say so rather than stretching them to fit.` : ''}
 
 Context chunks:
 ${contextBlock}`;
@@ -151,7 +151,7 @@ ${contextBlock}`;
       // a single word, because retrieval already finished earlier in the route
       // (before createUIMessageStream was even called).
       writer.write({
-        type: "data-citations",
+        type: 'data-citations',
         data: { chunks, lowConfidence },
       });
 
@@ -161,11 +161,11 @@ ${contextBlock}`;
       // model produces them. No tokens have necessarily been generated yet
       // at the point this line finishes executing; you just have the handle.
       const result = streamText({
-        model: google("gemini-2.5-flash-lite"),
+        model: google('gemini-2.5-flash-lite'),
         system: systemPrompt,
         messages: await convertToModelMessages(messages),
         onFinish: ({ finishReason, usage, finalStep }) => {
-          if (finishReason !== "stop") {
+          if (finishReason !== 'stop') {
             console.error(`Generation ended abnormally: ${finishReason}`, usage, JSON.stringify(finalStep.providerMetadata));
           }
         },

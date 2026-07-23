@@ -1,12 +1,12 @@
-import { config } from "dotenv";
-import path from "path";
-config({ path: path.resolve(process.cwd(), ".env.local") });
+import { config } from 'dotenv';
+import path from 'path';
+config({ path: path.resolve(process.cwd(), '.env.local') });
 
-import { readFile } from "fs/promises";
-import { PDFParse } from "pdf-parse";
-import { createClient } from "@supabase/supabase-js";
-import { embed, APICallError } from "ai";
-import { google } from "@ai-sdk/google";
+import { readFile } from 'fs/promises';
+import { PDFParse } from 'pdf-parse';
+import { createClient } from '@supabase/supabase-js';
+import { embed, APICallError } from 'ai';
+import { google } from '@ai-sdk/google';
 
 // ---------- Config ----------
 
@@ -30,11 +30,11 @@ interface CliArgs {
 
 function parseCliArgs(): CliArgs {
   const args = process.argv.slice(2);
-  const fileFlagIndex = args.indexOf("--file");
-  const docIdFlagIndex = args.indexOf("--document-id");
+  const fileFlagIndex = args.indexOf('--file');
+  const docIdFlagIndex = args.indexOf('--document-id');
 
   if (fileFlagIndex === -1 || docIdFlagIndex === -1) {
-    console.error("Usage: tsx scripts/ingest.ts --file <path> --document-id <id>");
+    console.error('Usage: tsx scripts/ingest.ts --file <path> --document-id <id>');
     process.exit(1);
   }
 
@@ -42,7 +42,7 @@ function parseCliArgs(): CliArgs {
   const documentId = args[docIdFlagIndex + 1];
 
   if (!filePath || !documentId) {
-    console.error("Missing value for --file or --document-id");
+    console.error('Missing value for --file or --document-id');
     process.exit(1);
   }
 
@@ -59,9 +59,9 @@ function requireEnv(name: string): string {
   return value;
 }
 
-const SUPABASE_URL = requireEnv("NEXT_PUBLIC_SUPABASE_URL");
-const SUPABASE_SECRET_KEY = requireEnv("SUPABASE_SECRET_KEY");
-requireEnv("GOOGLE_GENERATIVE_AI_API_KEY");
+const SUPABASE_URL = requireEnv('NEXT_PUBLIC_SUPABASE_URL');
+const SUPABASE_SECRET_KEY = requireEnv('SUPABASE_SECRET_KEY');
+requireEnv('GOOGLE_GENERATIVE_AI_API_KEY');
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 
@@ -81,7 +81,7 @@ async function extractPages(filePath: string): Promise<PageText[]> {
     const totalPages = info.total;
 
     if (!totalPages || totalPages === 0) {
-      throw new Error("PDF reports zero pages. File may be corrupt or unreadable.");
+      throw new Error('PDF reports zero pages. File may be corrupt or unreadable.');
     }
 
     const pages: PageText[] = [];
@@ -125,7 +125,7 @@ function splitIntoParagraphs(pages: PageText[]): Paragraph[] {
       .filter((p) => p.length > 0);
 
     for (const p of rawParagraphs) {
-      const isLikelyHeading = p.length < 80 && !/[.,;:]$/.test(p) && p.split(" ").length <= 10;
+      const isLikelyHeading = p.length < 80 && !/[.,;:]$/.test(p) && p.split(' ').length <= 10;
 
       paragraphs.push({ pageNumber: page.pageNumber, text: p, isLikelyHeading });
     }
@@ -205,7 +205,7 @@ function stripBackMatter(pages: PageText[]): PageText[] {
 
     const truncatedPage: PageText = {
       pageNumber: pages[pageIdx].pageNumber,
-      text: lines.slice(0, lineIdx).join("\n"),
+      text: lines.slice(0, lineIdx).join('\n'),
     };
 
     return [...pages.slice(0, pageIdx), truncatedPage];
@@ -226,7 +226,7 @@ function chunkParagraphs(paragraphs: Paragraph[]): Chunk[] {
   const flush = () => {
     if (currentWords.length === 0) return;
     chunks.push({
-      content: currentWords.join(" "),
+      content: currentWords.join(' '),
       chunkIndex,
       pageNumber: currentPageNumber ?? 1,
       sectionHeading: currentHeading,
@@ -289,15 +289,15 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
-type EmbedErrorClass = "rate_limited" | "quota_exhausted" | "other";
+type EmbedErrorClass = 'rate_limited' | 'quota_exhausted' | 'other';
 
 function classifyEmbedError(err: unknown): EmbedErrorClass {
   if (APICallError.isInstance(err) && err.statusCode === 429) {
-    const body = typeof err.responseBody === "string" ? err.responseBody.toLowerCase() : "";
-    if (body.includes("quota")) return "quota_exhausted";
-    return "rate_limited";
+    const body = typeof err.responseBody === 'string' ? err.responseBody.toLowerCase() : '';
+    if (body.includes('quota')) return 'quota_exhausted';
+    return 'rate_limited';
   }
-  return "other";
+  return 'other';
 }
 
 async function embedWithRetry(text: string): Promise<number[]> {
@@ -306,13 +306,13 @@ async function embedWithRetry(text: string): Promise<number[]> {
   while (true) {
     try {
       const { embedding } = await embed({
-        model: google.embeddingModel("gemini-embedding-001"),
+        model: google.embeddingModel('gemini-embedding-001'),
         value: text,
         maxRetries: 0, // disable SDK's internal retry — we own retry/backoff explicitly below
         providerOptions: {
           google: {
             outputDimensionality: EMBEDDING_DIMENSIONS,
-            taskType: "RETRIEVAL_DOCUMENT",
+            taskType: 'RETRIEVAL_DOCUMENT',
           },
         },
       });
@@ -325,13 +325,13 @@ async function embedWithRetry(text: string): Promise<number[]> {
     } catch (err: unknown) {
       const classification = classifyEmbedError(err);
 
-      if (classification === "quota_exhausted") {
+      if (classification === 'quota_exhausted') {
         throw new Error(`Quota exhausted — stopping ingestion, retrying will not help until quota resets. ${errorMessage(err)}`);
       }
 
       attempt++;
 
-      if (classification !== "rate_limited" || attempt >= MAX_EMBED_RETRIES) {
+      if (classification !== 'rate_limited' || attempt >= MAX_EMBED_RETRIES) {
         throw err;
       }
 
@@ -354,7 +354,7 @@ interface DocumentChunkRow {
 }
 
 async function upsertChunk(row: DocumentChunkRow): Promise<void> {
-  const { error } = await supabase.from("document_chunks").upsert(row, { onConflict: "document_id,chunk_index" });
+  const { error } = await supabase.from('document_chunks').upsert(row, { onConflict: 'document_id,chunk_index' });
 
   if (error) {
     throw new Error(`Supabase upsert failed for chunk_index ${row.chunk_index}: ${error.message}`);
@@ -362,7 +362,7 @@ async function upsertChunk(row: DocumentChunkRow): Promise<void> {
 }
 
 async function getExistingChunkIndices(documentId: string): Promise<Set<number>> {
-  const { data, error } = await supabase.from("document_chunks").select("chunk_index").eq("document_id", documentId);
+  const { data, error } = await supabase.from('document_chunks').select('chunk_index').eq('document_id', documentId);
 
   if (error) {
     throw new Error(`Failed to check existing chunks: ${error.message}`);
@@ -419,7 +419,7 @@ async function main(): Promise<void> {
   }
 
   const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-  console.log("--- Ingestion summary ---");
+  console.log('--- Ingestion summary ---');
   console.log(`Document ID: ${documentId}`);
   console.log(`Chunks succeeded this run: ${succeeded}`);
   console.log(`Chunks skipped (already ingested): ${skipped}`);
@@ -428,12 +428,12 @@ async function main(): Promise<void> {
   console.log(`Elapsed: ${elapsedSeconds}s`);
 
   if (failed > 0) {
-    console.error("Ingestion completed with failures. Corpus is incomplete — do not proceed to retrieval testing until this is resolved.");
+    console.error('Ingestion completed with failures. Corpus is incomplete — do not proceed to retrieval testing until this is resolved.');
     process.exit(1);
   }
 }
 
 main().catch((err: unknown) => {
-  console.error("Ingestion aborted:", errorMessage(err));
+  console.error('Ingestion aborted:', errorMessage(err));
   process.exit(1);
 });
