@@ -138,7 +138,7 @@ export default function Home() {
                 <div className={`max-w-[85%] space-y-3 ${isUser ? "" : "w-full"}`}>
                   {message.parts.map((part, i) => {
                     if (part.type === "data-citations") {
-                      const chunks = (part.data as { chunks: CitationChunk[] }).chunks;
+                      const { chunks, lowConfidence } = part.data as { chunks: CitationChunk[]; lowConfidence: boolean };
                       return (
                         <div key={i} className="rounded-lg border border-white/10 bg-white/3 p-3.5 backdrop-blur-sm">
                           {chunks.length === 0 ? (
@@ -148,6 +148,12 @@ export default function Home() {
                             </p>
                           ) : (
                             <>
+                              {lowConfidence && (
+                                <p className="sans mb-2.5 flex items-center gap-2 text-xs font-medium text-orange-400">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-orange-400" />
+                                  Low-confidence match — retrieved passages are only weakly similar to this question. Treat this answer with extra scrutiny.
+                                </p>
+                              )}
                               <p className="mono mb-2.5 text-[10px] uppercase tracking-[0.15em] text-white/40">Sources</p>
                               <ul className="space-y-3">
                                 {chunks.map((c) => (

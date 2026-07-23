@@ -161,6 +161,60 @@ function splitLongFragment(words: string[], maxWords: number): string[][] {
   return windows;
 }
 
+// Academic papers end with a References/Bibliography section: dozens of
+// entries like "175. Kadi, F.; Eriksson, A. Effects of anabolic steroids on
+// the muscle cells of strength-trained athletes. Med. Sci. Sports Exerc.
+// 1999..." These are dense with exactly the domain vocabulary a real query
+// uses (condition names, author names, topic words in paper titles), which
+// makes them score competitively — sometimes HIGHER — than actual body
+// prose in cosine similarity, while containing zero synthesized findings.
+// Left in the corpus, they get retrieved, and a downstream model will
+// paraphrase a citation's TITLE as if it were the review's own conclusion.
+// This is a content-type problem, not a similarity-threshold problem — no
+// amount of threshold tuning fixes a bibliography entry outscoring the real
+// answer.
+//
+// Detection MUST happen on raw page text, at line granularity, BEFORE
+// splitIntoParagraphs runs. Confirmed against this PDF's actual extraction
+// output: the page containing "References" has no blank-line separators at
+// all — every line ends in a single \r\n, including the line break right
+// before and after the heading itself. splitIntoParagraphs's regex
+// (\n{2,} or punctuation + 2 spaces) never fires here, so "References"
+// would be silently merged into one large paragraph with the surrounding
+// text and an exact-match check against a paragraph string would never
+// trigger. Checking raw lines sidesteps that entirely.
+//
+// This is a heuristic, not a guarantee: it assumes (a) the paper has
+// exactly one such heading, (b) it appears alone on its own line, (c) it
+// uses one of these three conventional English headings, and (d) once
+// found, EVERYTHING from that line to the end of the document is back
+// matter (true for a single-article PDF; would be wrong for a PDF
+// containing multiple concatenated articles). Papers with unconventional
+// structure will not be caught by this and need manual review. Known
+// limitation to revisit in Week 6 when ingesting other documents.
+const BACK_MATTER_HEADING = /^(references|bibliography|works cited)$/i;
+
+function stripBackMatter(pages: PageText[]): PageText[] {
+  for (let pageIdx = 0; pageIdx < pages.length; pageIdx++) {
+    const lines = pages[pageIdx].text.split(/\r?\n/);
+    const lineIdx = lines.findIndex((line) => BACK_MATTER_HEADING.test(line.trim()));
+
+    if (lineIdx === -1) continue;
+
+    console.log(`Back matter detected on page ${pages[pageIdx].pageNumber} ("${lines[lineIdx].trim()}"). Truncating this page there and dropping all ${pages.length - pageIdx - 1} page(s) after it entirely.`);
+
+    const truncatedPage: PageText = {
+      pageNumber: pages[pageIdx].pageNumber,
+      text: lines.slice(0, lineIdx).join("\n"),
+    };
+
+    return [...pages.slice(0, pageIdx), truncatedPage];
+  }
+
+  console.warn('No "References"/"Bibliography"/"Works Cited" heading found on any page — nothing stripped. If this document has a reference list, verify it was not silently missed.');
+  return pages;
+}
+
 function chunkParagraphs(paragraphs: Paragraph[]): Chunk[] {
   const chunks: Chunk[] = [];
   let currentWords: string[] = [];
@@ -327,7 +381,8 @@ async function main(): Promise<void> {
   const pages = await extractPages(filePath);
   console.log(`Extracted ${pages.length} pages.`);
 
-  const paragraphs = splitIntoParagraphs(pages);
+  const contentPages = stripBackMatter(pages);
+  const paragraphs = splitIntoParagraphs(contentPages);
   const chunks = chunkParagraphs(paragraphs);
   console.log(`Built ${chunks.length} chunks (target ${CHUNK_WORD_TARGET} words, ${CHUNK_WORD_OVERLAP} word overlap, ${MAX_SENTENCE_WORDS} word sentence cap).`);
 
