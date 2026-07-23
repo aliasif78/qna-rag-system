@@ -1,5 +1,8 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
+import { createSupabaseBrowserClient } from '@/lib/supabase/client';
+
 import { useEffect, useRef, useState } from 'react';
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport } from 'ai';
@@ -45,6 +48,8 @@ export default function Home() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stars = useStars(90);
 
+  const router = useRouter();
+
   const { messages, sendMessage, status, error } = useChat({
     transport: new DefaultChatTransport({ api: '/api/chat' }),
   });
@@ -55,6 +60,16 @@ export default function Home() {
       behavior: 'smooth',
     });
   }, [messages, status]);
+
+  async function handleSignOut() {
+    const supabase = createSupabaseBrowserClient();
+    await supabase.auth.signOut();
+    router.push('/auth');
+    router.refresh();
+    // router.refresh() is required: it clears the Next.js router cache so the
+    // middleware re-evaluates auth state on the next navigation. Without it,
+    // a cached / render can flash before the redirect completes.
+  }
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -110,6 +125,9 @@ export default function Home() {
           </span>
           Live
         </div>
+        <button onClick={handleSignOut} className="cursor-pointer rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/50 transition-colors hover:border-white/30 hover:text-white/80" style={{ fontFamily: 'var(--font-mono)' }}>
+          Sign out
+        </button>
       </header>
 
       {/* ---------- Messages ---------- */}
