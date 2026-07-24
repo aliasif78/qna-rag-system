@@ -64,6 +64,13 @@ export default function AuthPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // Set only when signUp succeeds but returns no session — i.e. Supabase's
+  // "Confirm email" setting is on and the account is pending verification.
+  // This is NOT an error: authError is null in this case. It must be tracked
+  // separately, because it changes the entire screen (no form, no redirect).
+  const [pendingConfirmationEmail, setPendingConfirmationEmail] = useState<string | null>(null);
+  const [resendState, setResendState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+
   const isSignUp = mode === 'signup';
   // Only enforce the eligibility gate in signup mode. Sign-in accepts whatever
   // the user types and lets the server return the error.
@@ -76,7 +83,23 @@ export default function AuthPage() {
 
     const supabase = createSupabaseBrowserClient();
 
-    const { error: authError } = mode === 'signin' ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password });
+    if (mode === 'signin') {
+      const { error: authError } = await supabase.auth.signInWithPassword({ email, password });
+
+      setLoading(false);
+
+      if (authError) {
+        setError(authError.message);
+        return;
+      }
+
+      router.push('/');
+      router.refresh();
+      return;
+    }
+
+    // --- signup ---
+    const { data, error: authError } = await supabase.auth.signUp({ email, password });
 
     setLoading(false);
 
@@ -85,14 +108,92 @@ export default function AuthPage() {
       return;
     }
 
+    // Supabase does NOT return an error when email confirmation is required.
+    // It returns data.user populated and data.session: null. Redirecting here
+    // unconditionally is the bug: proxy.ts's getUser() finds no session on
+    // the next request and bounces the new user straight back to /auth with
+    // no explanation. A null session on signUp is the actual signal to check.
+    if (!data.session) {
+      setPendingConfirmationEmail(email);
+      return;
+    }
+
+    // Confirmation is disabled on this project (or the user was auto-confirmed
+    // some other way) — a real session came back, so proceed as before.
     router.push('/');
     router.refresh();
+  }
+
+  async function handleResend() {
+    if (!pendingConfirmationEmail) return;
+
+    setResendState('sending');
+    const supabase = createSupabaseBrowserClient();
+
+    const { error: resendError } = await supabase.auth.resend({
+      type: 'signup',
+      email: pendingConfirmationEmail,
+    });
+
+    setResendState(resendError ? 'error' : 'sent');
   }
 
   function handleModeToggle() {
     setMode(mode === 'signin' ? 'signup' : 'signin');
     setError(null);
     setShowPassword(false);
+    setPendingConfirmationEmail(null);
+    setResendState('idle');
+  }
+
+  function handleBackToSignIn() {
+    setPendingConfirmationEmail(null);
+    setResendState('idle');
+    setMode('signin');
+    setEmail('');
+    setPassword('');
+    setError(null);
+  }
+
+  // ---------------------------------------------------------------------
+  // Confirmation-pending screen — replaces the form entirely. Showing the
+  // form again alongside a message invites the user to just resubmit,
+  // which re-triggers signUp against an existing unconfirmed account.
+  // ---------------------------------------------------------------------
+  if (pendingConfirmationEmail) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-black px-4">
+        <div className="flex w-full max-w-sm flex-col gap-6 rounded-xl border border-white/10 bg-white/5 p-8 backdrop-blur-sm">
+          <div className="flex flex-col gap-1">
+            <h1 className="text-lg font-semibold text-white" style={{ fontFamily: 'var(--font-mono)' }}>
+              Check your email
+            </h1>
+            <p className="text-sm text-white/40" style={{ fontFamily: 'var(--font-mono)' }}>
+              We sent a confirmation link to <span className="text-white/70">{pendingConfirmationEmail}</span>. Click it to activate your account, then sign in.
+            </p>
+          </div>
+
+          {resendState === 'sent' && (
+            <p className="text-sm text-sky-400" style={{ fontFamily: 'var(--font-mono)' }}>
+              Confirmation email resent.
+            </p>
+          )}
+          {resendState === 'error' && (
+            <p className="text-sm text-orange-400" style={{ fontFamily: 'var(--font-mono)' }}>
+              Could not resend. Try again shortly.
+            </p>
+          )}
+
+          <button onClick={handleResend} disabled={resendState === 'sending'} className="w-full cursor-pointer rounded-lg border border-sky-400/30 bg-sky-400/10 px-5 py-2.5 text-sm text-sky-300 transition-colors hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-40" style={{ fontFamily: 'var(--font-mono)' }}>
+            {resendState === 'sending' ? 'Sending…' : 'Resend confirmation email'}
+          </button>
+
+          <button onClick={handleBackToSignIn} className="text-center text-xs text-sky-400 transition-colors hover:text-sky-300" style={{ fontFamily: 'var(--font-mono)' }}>
+            Back to sign in
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
