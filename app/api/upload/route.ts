@@ -52,12 +52,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   if (file.size > MAX_FILE_SIZE_BYTES) {
-    return Response.json(
-      {
-        error: `File too large: ${(file.size / 1024 / 1024).toFixed(1)}MB. Maximum is 20MB.`,
-      },
-      { status: 413 }
-    );
+    return Response.json({ error: `File too large: ${(file.size / 1024 / 1024).toFixed(1)}MB. Maximum is 20MB.` }, { status: 413 });
   }
 
   const arrayBuffer = await file.arrayBuffer();
@@ -70,27 +65,8 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: 'File does not appear to be a valid PDF.' }, { status: 422 });
   }
 
-  // Delete the user's existing chunks BEFORE ingestion.
-  //
-  // KNOWN LIMITATION — NOT ATOMIC: If ingestion fails partway through
-  // (e.g. embedding error on chunk 12 of 27), the old chunks are already
-  // gone and only a partial set of new chunks exists. The document is in a
-  // degraded state. The correct production fix is to ingest with a new
-  // ingestion_id and atomically swap, or wrap both steps in a Postgres
-  // transaction via RPC. That is out of scope for this stage.
-  //
-  // This requires an RLS policy that allows authenticated users to DELETE
-  // WHERE user_id = auth.uid(). If that policy is missing, this call
-  // succeeds (Supabase returns no error for a zero-row delete) but does
-  // nothing — old chunks remain and conflict on upsert.
-  const { error: deleteError } = await supabase.from('document_chunks').delete().eq('user_id', userId);
-
-  if (deleteError) {
-    console.error(`Failed to delete existing chunks for user ${userId}:`, deleteError.message);
-    return Response.json({ error: 'Failed to clear existing document.' }, { status: 500 });
-  }
-
-  // Extract, strip back matter, split, chunk
+  // Extract, strip back matter, split, chunk — BEFORE touching existing data.
+  // This is pure/in-memory: no reason it should happen after a destructive delete.
   let chunks: Awaited<ReturnType<typeof chunkParagraphs>>;
   try {
     const pages = await extractPages(buffer);
@@ -106,10 +82,21 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: 'Document produced no chunks. It may be empty, image-only, or entirely back matter.' }, { status: 422 });
   }
 
-  // document_id is the user's ID — one document per user, no slug management.
-  // This breaks if you ever want multi-document support. When that comes,
-  // document_id becomes a separate parameter and you'll need to scope the
-  // delete above to (user_id, document_id) rather than just user_id.
+  // Only now do we know the new document is viable. Safe to delete the old one.
+  //
+  // KNOWN LIMITATION — STILL NOT ATOMIC: this reorder eliminates the "delete
+  // then fail validation" failure mode, but the embed loop below can still
+  // fail partway through and leave a degraded document (old data is gone,
+  // new data is incomplete). Real fix is ingest-to-new-id + atomic swap,
+  // or a Postgres transaction via RPC. Out of scope for this stage —
+  // documented, not solved.
+  const { error: deleteError } = await supabase.from('document_chunks').delete().eq('user_id', userId);
+
+  if (deleteError) {
+    console.error(`Failed to delete existing chunks for user ${userId}:`, deleteError.message);
+    return Response.json({ error: 'Failed to clear existing document.' }, { status: 500 });
+  }
+
   const documentId = userId;
 
   // Embed and upsert — serial, one chunk at a time.
