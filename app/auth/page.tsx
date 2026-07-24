@@ -23,9 +23,16 @@ const STRENGTH_RULES: StrengthRule[] = [
   { label: 'Special character', test: (pw) => /[^A-Za-z0-9]/.test(pw) },
 ];
 
-// The only hard gate: minimum length. The rest are informational.
+// All rules are now a hard gate, not just the length check. Note this is
+// STILL only client-side UX — it prevents the submit button from being
+// clicked, nothing more. A request sent directly to Supabase's REST API
+// bypasses this file entirely. The actual enforcement boundary is Supabase
+// Auth's server-side "Password Requirements" setting (Dashboard >
+// Authentication > Policies). If that's not set to require digits + symbols,
+// none of this is enforced anywhere — verify it before claiming it's
+// enforced.
 function isPasswordEligible(password: string): boolean {
-  return password.length >= 8;
+  return STRENGTH_RULES.every((rule) => rule.test(password));
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +111,11 @@ export default function AuthPage() {
     setLoading(false);
 
     if (authError) {
+      // If Supabase's server-side password policy is configured (Dashboard >
+      // Authentication > Policies) and rejects a weak password, it surfaces
+      // here as authError even if the client gate above somehow passed it
+      // (e.g. gate logic drifts from server policy in the future). Don't
+      // assume client-side pass == server-side pass.
       setError(authError.message);
       return;
     }
