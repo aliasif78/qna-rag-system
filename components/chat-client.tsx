@@ -171,6 +171,18 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
         return;
       }
 
+      // 409 means the server's upload_locks guard rejected this request because
+      // another upload for this user is already running (or was, within the
+      // stale-lock window). Nothing was deleted server-side in this case — the
+      // existing document, if any, is untouched — so this must NOT fall through
+      // to the generic error path below, which assumes the old document is gone.
+      if (res.status === 409) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        setUploadState('error');
+        setUploadError(data?.error ?? 'Another upload is already in progress.');
+        return;
+      }
+
       // The route can fail after partially writing chunks; its 500 body
       // carries chunksIngested. Surface it — "upload failed" while the
       // previous document has already been deleted is a state the user needs
