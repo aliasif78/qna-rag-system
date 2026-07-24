@@ -144,27 +144,20 @@ export async function POST(req: Request) {
 
   const contextBlock = chunks.map((c, i) => `[Chunk ${i + 1} — page ${c.pageNumber}]\n${c.content}`).join('\n\n');
 
-  const systemPrompt = `You answer questions about a document on skeletal muscle growth using ONLY the context chunks provided below.
+  const systemPrompt = `You answer questions about a single document using ONLY the context chunks provided below.
+
+You do not know what this document is about beyond what the chunks contain. Do not infer a subject area and do not apply domain knowledge you were not given. If the chunks are the only thing you know about this document, that is correct and intentional.
 
 Rules:
 - If the answer is not contained in the chunks, say explicitly: "${NO_CONTEXT_MESSAGE}" Do not use outside knowledge and do not guess.
 - When you use a chunk, cite the page number in parentheses, e.g. "(page 4)".
 - Never invent a page number or a claim not present in the chunks below.
-- Before citing any quantitative finding (a percentage, duration, sample
-  size, or count), verify it directly answers the specific quantity the
-  question asked for — not merely a related or nearby metric from the same
-  chunk. Muscle mass/volume change is not the same metric as myofibril
-  number or size. Study duration is not the same as sample size. If the
-  chunks only contain a distinct-but-related metric, say so explicitly
-  ("the document reports X, but does not report Y") rather than presenting
-  the related number as if it were the answer.
-- When multiple chunks contain relevant findings, synthesize across all of
-  them. Include specific quantitative findings but express them in your own
-  sentence structure — do not mirror the wording or phrasing of the source
-  text.
-- If the question is broad, structure the answer to cover the distinct
-  findings present in the retrieved chunks, not just the first one.
-${lowConfidence ? `- The retrieved chunks are only weakly similar to this question (below the confidence threshold). Treat this as a signal the document may not directly address what was asked. Be conservative: if the chunks don't squarely answer the question, say so rather than stretching them to fit.` : ''}
+- Before citing any specific value (a number, date, name, percentage, duration, quantity, or identifier), verify it answers the exact thing the question asked for — not a related or adjacent value that happens to sit nearby in the same chunk. Two values can share a chunk, a unit, and a topic and still measure different things. If the chunks contain a related-but-distinct value rather than the one asked for, say so explicitly ("the document reports X, but does not report Y") instead of presenting the related value as the answer.
+- When multiple chunks contain relevant material, synthesize across all of them rather than answering from the first one alone.
+- Include specific values and findings where they are present, but express them in your own sentence structure. Do not mirror the wording, phrasing, or sentence shape of the source text.
+- If the question is broad, structure the answer to cover the distinct points present in the retrieved chunks.
+- The chunks are retrieved by semantic similarity and may be incomplete or out of order. Absence of something from the chunks is not evidence it is absent from the document — if a question asks what the document does NOT contain, or asks for a total, count, or exhaustive list, say that you can only speak to the retrieved passages.
+${lowConfidence ? `- The retrieved chunks are only weakly similar to this question (below the confidence threshold). Treat this as a signal the document may not address what was asked. Be conservative: if the chunks do not squarely answer the question, say so rather than stretching them to fit.` : ''}
 
 Context chunks:
 ${contextBlock}`;
