@@ -3,7 +3,7 @@
 import { createUIMessageStream, createUIMessageStreamResponse, streamText, convertToModelMessages, UIMessage, toUIMessageStream } from 'ai';
 import { google } from '@ai-sdk/google';
 import { embedQuery, QueryEmbeddingError } from '@/lib/ai/embed-query';
-import { supabase } from '@/lib/supabase/client';
+import { createSupabaseServerClient } from '@/lib/supabase/server';
 
 export const maxDuration = 30;
 
@@ -31,7 +31,36 @@ interface RetrievedChunk {
 }
 
 export async function POST(req: Request) {
-  const { messages }: { messages: UIMessage[] } = await req.json();
+  // Auth first. Nothing else — no body parse, no embedding call — happens
+  // for an unauthenticated request. getUser() revalidates the JWT against
+  // the Supabase Auth server; getSession() only decodes the cookie and is
+  // spoofable, so it must not be used for an authorization decision.
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return new Response('Unauthorized.', { status: 401 });
+  }
+
+  // One document per user: the ingestion pipeline stores the user's ID as
+  // document_id. This is a deliberate single-document limitation, not a
+  // multi-document design. Adding a second document per user requires a
+  // real document_id column and a request parameter.
+  const documentId = user.id;
+
+  let messages: UIMessage[];
+  try {
+    ({ messages } = await req.json());
+  } catch {
+    return new Response('Malformed request body.', { status: 400 });
+  }
+
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return new Response('messages must be a non-empty array.', { status: 400 });
+  }
 
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage || lastMessage.role !== 'user') {
@@ -54,10 +83,17 @@ export async function POST(req: Request) {
   try {
     const queryEmbedding = await embedQuery(userText);
 
+    // match_document_id is derived from the verified session, never from the
+    // request body. A client cannot address another user's document by
+    // forging a parameter. Whether RLS provides a second layer here depends
+    // on match_document_chunks being SECURITY INVOKER — verify with:
+    //   SELECT proname, prosecdef FROM pg_proc
+    //   WHERE proname = 'match_document_chunks';
+    // prosecdef = true means this parameter is the ONLY isolation boundary.
     const { data, error } = await supabase.rpc('match_document_chunks', {
       query_embedding: queryEmbedding,
-      match_document_id: 'skeletal-muscle-growth',
-      match_count: 3,
+      match_document_id: documentId,
+      match_count: 5,
       match_threshold: RETRIEVAL_THRESHOLD,
     });
 
@@ -86,7 +122,9 @@ export async function POST(req: Request) {
   // Hard gate: nothing cleared RETRIEVAL_THRESHOLD. Do not call the model at
   // all. Refusal here is a code-level guarantee, not a prompt instruction the
   // model could choose to ignore, and it saves a generation call we already
-  // know should refuse.
+  // know should refuse. Note this branch is also what an authenticated user
+  // with no ingested document hits — it is indistinguishable from a genuine
+  // no-match, which is a UX gap worth closing separately.
   if (chunks.length === 0) {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
@@ -131,37 +169,13 @@ ${lowConfidence ? `- The retrieved chunks are only weakly similar to this questi
 Context chunks:
 ${contextBlock}`;
 
-  // createUIMessageStream() itself does nothing until something starts
-  // consuming it. It wires up `execute` to run when the stream is read,
-  // and handles merging multiple writer.write/writer.merge calls into a
-  // single well-formed UIMessageStream, including auto-generating the
-  // start/finish envelope events and catching thrown errors inside execute
-  // so a crash mid-generation becomes a stream error event instead of an
-  // unhandled server exception.
   const stream = createUIMessageStream({
-    // This callback runs once per request, on the server. `writer` is your
-    // handle for pushing arbitrary parts into the outgoing UI message stream
-    // — it is NOT the same as returning a value; nothing is sent until you
-    // call writer.write() or writer.merge().
     execute: async ({ writer }) => {
-      // Pushes a single, complete, non-streamed part into the stream immediately.
-      // `type: "data-citations"` is a custom part type (the "data-" prefix is
-      // the AI SDK convention that makes it show up in message.parts on the
-      // client as { type: "data-citations", data: {...} }). This part carries
-      // your retrieved chunks — content, page, similarity — as one atomic
-      // JSON blob, not token-by-token. It arrives before the LLM has generated
-      // a single word, because retrieval already finished earlier in the route
-      // (before createUIMessageStream was even called).
       writer.write({
         type: 'data-citations',
         data: { chunks, lowConfidence },
       });
 
-      // Starts the actual LLM generation. streamText() does not block here —
-      // it returns immediately with a StreamTextResult object whose
-      // .stream property is an async iterable that yields chunks as the
-      // model produces them. No tokens have necessarily been generated yet
-      // at the point this line finishes executing; you just have the handle.
       const result = streamText({
         model: google('gemini-2.5-flash-lite'),
         system: systemPrompt,
@@ -173,23 +187,9 @@ ${contextBlock}`;
         },
       });
 
-      // toUIMessageStream() adapts the raw model stream (text-delta events,
-      // tool-call events, finish events) into the UIMessageStream chunk
-      // format (start, text-start, text-delta, text-end, finish, etc.) —
-      // the same wire format your data-citations part already used.
-      // writer.merge() then splices that adapted stream into the SAME
-      // outgoing stream as the citations part, back-pressure-aware: it
-      // waits for the model to actually produce tokens rather than buffering
-      // everything in memory. The client sees one continuous stream where
-      // the citations part arrived first, followed by streaming text parts
-      // as the model generates them.
       writer.merge(toUIMessageStream({ stream: result.stream }));
     },
   });
 
-  // Wraps the UIMessageStream in an actual HTTP Response object with the
-  // correct headers (content-type, no caching, chunked transfer) that
-  // useChat's default transport expects. This is the return value of your
-  // route handler — the thing Next.js actually sends over the wire.
   return createUIMessageStreamResponse({ stream });
 }
