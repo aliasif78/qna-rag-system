@@ -1,0 +1,169 @@
+// app/api/upload/route.ts
+
+import { createSupabaseServerClient } from '@/lib/supabase/server';
+import { extractPages, stripBackMatter, splitIntoParagraphs, chunkParagraphs, embedWithRetry, errorMessage } from '@/lib/ai/ingest-pipeline';
+
+// Long-running route: PDF parse + N serial embedding calls with backoff.
+// 60s is tight if the Gemini free tier rate-limits mid-ingestion and backoff
+// kicks in repeatedly. For larger documents (50+ pages → 50+ chunks) this
+// will time out. The fix is either async job processing (beyond this scope)
+// or batched parallel embedding (risk: hammers rate limits harder).
+export const maxDuration = 60;
+
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+
+export async function POST(request: Request): Promise<Response> {
+  // Auth — getUser(), not getSession().
+  // getSession() reads the JWT from the cookie without re-validating with the
+  // Supabase auth server. A replayed or tampered token passes silently.
+  // getUser() makes a server round-trip to verify the token every time.
+  // For a route that deletes and re-writes user data, anything less is wrong.
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return Response.json({ error: 'Unauthorized.' }, { status: 401 });
+  }
+
+  const userId = user.id;
+
+  // Parse multipart body
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return Response.json({ error: 'Could not parse multipart/form-data body.' }, { status: 400 });
+  }
+
+  const file = formData.get('file');
+
+  if (!file || !(file instanceof File)) {
+    return Response.json({ error: 'Missing "file" field in form data.' }, { status: 400 });
+  }
+
+  // MIME type comes from the client — trivially spoofable. Check it anyway
+  // for fast rejection of obvious mistakes, but don't trust it as the sole
+  // content guard. Magic bytes below are the real check.
+  if (file.type !== 'application/pdf') {
+    return Response.json({ error: `Invalid file type: "${file.type}". Only application/pdf is accepted.` }, { status: 415 });
+  }
+
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return Response.json(
+      {
+        error: `File too large: ${(file.size / 1024 / 1024).toFixed(1)}MB. Maximum is 20MB.`,
+      },
+      { status: 413 }
+    );
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+
+  // Magic bytes: every valid PDF starts with %PDF (hex 25 50 44 46).
+  // This catches spoofed MIME types and genuinely corrupt uploads before
+  // they hit the parser, which would otherwise surface a less useful error.
+  if (buffer.length < 4 || buffer.subarray(0, 4).toString('ascii') !== '%PDF') {
+    return Response.json({ error: 'File does not appear to be a valid PDF.' }, { status: 422 });
+  }
+
+  // Delete the user's existing chunks BEFORE ingestion.
+  //
+  // KNOWN LIMITATION — NOT ATOMIC: If ingestion fails partway through
+  // (e.g. embedding error on chunk 12 of 27), the old chunks are already
+  // gone and only a partial set of new chunks exists. The document is in a
+  // degraded state. The correct production fix is to ingest with a new
+  // ingestion_id and atomically swap, or wrap both steps in a Postgres
+  // transaction via RPC. That is out of scope for this stage.
+  //
+  // This requires an RLS policy that allows authenticated users to DELETE
+  // WHERE user_id = auth.uid(). If that policy is missing, this call
+  // succeeds (Supabase returns no error for a zero-row delete) but does
+  // nothing — old chunks remain and conflict on upsert.
+  const { error: deleteError } = await supabase.from('document_chunks').delete().eq('user_id', userId);
+
+  if (deleteError) {
+    console.error(`Failed to delete existing chunks for user ${userId}:`, deleteError.message);
+    return Response.json({ error: 'Failed to clear existing document.' }, { status: 500 });
+  }
+
+  // Extract, strip back matter, split, chunk
+  let chunks: Awaited<ReturnType<typeof chunkParagraphs>>;
+  try {
+    const pages = await extractPages(buffer);
+    const contentPages = stripBackMatter(pages);
+    const paragraphs = splitIntoParagraphs(contentPages);
+    chunks = chunkParagraphs(paragraphs);
+  } catch (err) {
+    console.error(`Pipeline (extract/chunk) failed for user ${userId}:`, errorMessage(err));
+    return Response.json({ error: 'Document processing failed. The file may be corrupt or image-only.' }, { status: 422 });
+  }
+
+  if (chunks.length === 0) {
+    return Response.json({ error: 'Document produced no chunks. It may be empty, image-only, or entirely back matter.' }, { status: 422 });
+  }
+
+  // document_id is the user's ID — one document per user, no slug management.
+  // This breaks if you ever want multi-document support. When that comes,
+  // document_id becomes a separate parameter and you'll need to scope the
+  // delete above to (user_id, document_id) rather than just user_id.
+  const documentId = userId;
+
+  // Embed and upsert — serial, one chunk at a time.
+  // Serial is correct here given Gemini's free-tier rate limits. Parallel
+  // requests would batch faster in theory but hammer the limit and cause
+  // more backoff retries. For paid-tier keys with high RPM, switch to
+  // batched parallel with a concurrency cap (e.g. p-limit(5)).
+  let chunksIngested = 0;
+
+  for (const chunk of chunks) {
+    let embedding: number[];
+
+    try {
+      embedding = await embedWithRetry(chunk.content);
+    } catch (err) {
+      console.error(`Embedding failed on chunk ${chunk.chunkIndex} for user ${userId}: ${errorMessage(err)}. ` + `Document is now in a degraded state — ${chunksIngested} of ${chunks.length} chunks ingested.`);
+      // Do not continue the loop: if embedding is failing (quota exhausted,
+      // persistent error), subsequent calls will also fail. Returning now
+      // avoids burning through all remaining chunks only to fail again.
+      return Response.json(
+        {
+          error: `Ingestion failed at chunk ${chunk.chunkIndex}: ${errorMessage(err)}. Document is incomplete — ${chunksIngested} of ${chunks.length} chunks were stored.`,
+          chunksIngested,
+        },
+        { status: 500 }
+      );
+    }
+
+    const { error: upsertError } = await supabase.from('document_chunks').upsert(
+      {
+        document_id: documentId,
+        content: chunk.content,
+        embedding,
+        chunk_index: chunk.chunkIndex,
+        page_number: chunk.pageNumber,
+        section_heading: chunk.sectionHeading,
+        user_id: userId,
+      },
+      { onConflict: 'document_id,chunk_index' }
+    );
+
+    if (upsertError) {
+      console.error(`Supabase upsert failed on chunk ${chunk.chunkIndex} for user ${userId}: ${upsertError.message}. ` + `Document is now in a degraded state.`);
+      return Response.json(
+        {
+          error: `Database write failed at chunk ${chunk.chunkIndex}. Document is incomplete — ${chunksIngested} of ${chunks.length} chunks were stored.`,
+          chunksIngested,
+        },
+        { status: 500 }
+      );
+    }
+
+    chunksIngested++;
+  }
+
+  return Response.json({ chunksIngested });
+}

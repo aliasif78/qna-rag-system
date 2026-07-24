@@ -1,3 +1,5 @@
+// app/api/chat/route.ts
+
 import { createUIMessageStream, createUIMessageStreamResponse, streamText, convertToModelMessages, UIMessage, toUIMessageStream } from 'ai';
 import { google } from '@ai-sdk/google';
 import { embedQuery, QueryEmbeddingError } from '@/lib/ai/embed-query';
