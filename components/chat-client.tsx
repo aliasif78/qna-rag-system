@@ -80,7 +80,7 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
   // destroyed it.
   const [replacing, setReplacing] = useState(false);
 
-  const { messages, sendMessage, status, error } = useChat({
+  const { messages, sendMessage, setMessages, status, error } = useChat({
     transport: new DefaultChatTransport({ api: '/api/chat' }),
   });
 
@@ -196,6 +196,11 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
         // The old document was deleted server-side before ingestion began, so
         // there is no usable document now regardless of what was there before.
         setChunkCount(0);
+        // The old chat, if any, was grounded in the document that was just
+        // deleted server-side. It is now grounded in nothing. Clearing it
+        // here (not just on success) prevents a half-failed replace from
+        // leaving stale, no-longer-valid citations on screen.
+        setMessages([]);
         return;
       }
 
@@ -205,6 +210,7 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
         setUploadState('error');
         setUploadError('Server reported 0 chunks ingested. The document is not queryable.');
         setChunkCount(0);
+        setMessages([]);
         return;
       }
 
@@ -212,6 +218,11 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
       setLastIngested(ingested);
       setChunkCount(ingested);
       setReplacing(false);
+      // Any prior conversation was grounded in the document that just got
+      // replaced. Leaving it on screen would show real citations and answers
+      // pointing at a document Postgres no longer has — clear it so the next
+      // message starts fresh against the new document.
+      setMessages([]);
     } catch (err) {
       setUploadState('error');
       setUploadError(err instanceof Error ? err.message : 'Upload failed — could not reach the server.');
@@ -296,7 +307,11 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
       {/* ---------- Messages ---------- */}
       <div ref={scrollRef} className="relative z-10 flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto flex max-w-2xl flex-col gap-5">
-          {messages.length === 0 && showUploadPanel && (
+          {/* Upload panel — gated ONLY on showUploadPanel. It must render
+              regardless of message count: replacing an existing document
+              with an active conversation is exactly the case this panel
+              exists to handle (see the replacing-specific copy below). */}
+          {showUploadPanel && (
             <div className="fade-up mt-16 flex flex-col items-center gap-5 text-center">
               <div className="w-full max-w-md rounded-xl border border-white/10 bg-white/5 p-6 backdrop-blur-sm">
                 <h2 className="sans text-base font-semibold text-white">{replacing ? 'Replace your document' : 'Upload a document to begin'}</h2>
@@ -304,7 +319,7 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
 
                 {statusUnavailable && !replacing && <p className="sans mt-3 text-xs leading-relaxed text-orange-400">Could not read your document status. If you have already uploaded a document it may still be there — reload before re-uploading, since uploading deletes existing chunks first.</p>}
 
-                {replacing && <p className="sans mt-3 text-xs leading-relaxed text-orange-400">Uploading a new file permanently deletes your current document&apos;s chunks before ingesting. If ingestion fails partway, the old document is not recoverable.</p>}
+                {replacing && <p className="sans mt-3 text-xs leading-relaxed text-orange-400">Uploading a new file permanently deletes your current document&apos;s chunks before ingesting. If ingestion fails partway, the old document is not recoverable. Your current conversation will be cleared once the new document is ready.</p>}
 
                 <input ref={fileInputRef} type="file" accept="application/pdf" onChange={handleFileSelected} className="hidden" />
 
@@ -336,7 +351,7 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
             </div>
           )}
 
-          {messages.length === 0 && !showUploadPanel && (
+          {!showUploadPanel && messages.length === 0 && (
             <div className="fade-up mt-16 flex flex-col items-center gap-6 text-center">
               {uploadState === 'success' && lastIngested !== null && <p className="mono text-xs text-sky-400">Document ingested — {lastIngested} chunks indexed.</p>}
 
@@ -352,71 +367,72 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
             </div>
           )}
 
-          {messages.map((message) => {
-            const isUser = message.role === 'user';
-            return (
-              <div key={message.id} className={`fade-up flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
-                <span className={`mono mb-1.5 text-[10px] tracking-[0.15em] uppercase ${isUser ? 'text-orange-400/90' : 'text-sky-400/90'}`}>{isUser ? 'You' : 'Assistant'}</span>
+          {!showUploadPanel &&
+            messages.map((message) => {
+              const isUser = message.role === 'user';
+              return (
+                <div key={message.id} className={`fade-up flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+                  <span className={`mono mb-1.5 text-[10px] tracking-[0.15em] uppercase ${isUser ? 'text-orange-400/90' : 'text-sky-400/90'}`}>{isUser ? 'You' : 'Assistant'}</span>
 
-                <div className={`max-w-[85%] space-y-3 ${isUser ? '' : 'w-full'}`}>
-                  {message.parts.map((part, i) => {
-                    if (part.type === 'data-citations') {
-                      const { chunks, lowConfidence } = part.data as {
-                        chunks: CitationChunk[];
-                        lowConfidence: boolean;
-                      };
-                      return (
-                        <div key={i} className="rounded-lg border border-white/10 bg-white/5 p-3.5 backdrop-blur-sm">
-                          {chunks.length === 0 ? (
-                            <p className="sans flex items-center gap-2 text-sm font-medium text-orange-400">
-                              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-400" />
-                              No relevant chunks found above the similarity threshold — this answer is not grounded in the document.
-                            </p>
-                          ) : (
-                            <>
-                              {lowConfidence && (
-                                <p className="sans mb-2.5 flex items-center gap-2 text-xs font-medium text-orange-400">
-                                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-400" />
-                                  Low-confidence match — retrieved passages are only weakly similar to this question. Treat this answer with extra scrutiny.
-                                </p>
-                              )}
-                              <p className="mono mb-2.5 text-[10px] tracking-[0.15em] text-white/60 uppercase">Sources</p>
-                              <ul className="space-y-3">
-                                {chunks.map((c) => (
-                                  <li key={c.id} className="text-xs">
-                                    <div className="mono mb-1 flex items-center justify-between text-[10px] text-white/60">
-                                      <span>page {c.pageNumber}</span>
-                                      <span>{c.similarity.toFixed(3)}</span>
-                                    </div>
-                                    <div className="mb-1.5 h-1 w-full overflow-hidden rounded-full bg-white/10">
-                                      <div className="h-full rounded-full bg-linear-to-r from-sky-400 to-orange-400" style={{ width: `${Math.min(c.similarity * 100, 100)}%` }} />
-                                    </div>
-                                    <p className="sans line-clamp-2 text-white/80">{c.content}</p>
-                                  </li>
-                                ))}
-                              </ul>
-                            </>
-                          )}
-                        </div>
-                      );
-                    }
+                  <div className={`max-w-[85%] space-y-3 ${isUser ? '' : 'w-full'}`}>
+                    {message.parts.map((part, i) => {
+                      if (part.type === 'data-citations') {
+                        const { chunks, lowConfidence } = part.data as {
+                          chunks: CitationChunk[];
+                          lowConfidence: boolean;
+                        };
+                        return (
+                          <div key={i} className="rounded-lg border border-white/10 bg-white/5 p-3.5 backdrop-blur-sm">
+                            {chunks.length === 0 ? (
+                              <p className="sans flex items-center gap-2 text-sm font-medium text-orange-400">
+                                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-400" />
+                                No relevant chunks found above the similarity threshold — this answer is not grounded in the document.
+                              </p>
+                            ) : (
+                              <>
+                                {lowConfidence && (
+                                  <p className="sans mb-2.5 flex items-center gap-2 text-xs font-medium text-orange-400">
+                                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-400" />
+                                    Low-confidence match — retrieved passages are only weakly similar to this question. Treat this answer with extra scrutiny.
+                                  </p>
+                                )}
+                                <p className="mono mb-2.5 text-[10px] tracking-[0.15em] text-white/60 uppercase">Sources</p>
+                                <ul className="space-y-3">
+                                  {chunks.map((c) => (
+                                    <li key={c.id} className="text-xs">
+                                      <div className="mono mb-1 flex items-center justify-between text-[10px] text-white/60">
+                                        <span>page {c.pageNumber}</span>
+                                        <span>{c.similarity.toFixed(3)}</span>
+                                      </div>
+                                      <div className="mb-1.5 h-1 w-full overflow-hidden rounded-full bg-white/10">
+                                        <div className="h-full rounded-full bg-linear-to-r from-sky-400 to-orange-400" style={{ width: `${Math.min(c.similarity * 100, 100)}%` }} />
+                                      </div>
+                                      <p className="sans line-clamp-2 text-white/80">{c.content}</p>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </>
+                            )}
+                          </div>
+                        );
+                      }
 
-                    if (part.type === 'text') {
-                      return (
-                        <p key={i} className={`sans rounded-2xl px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap ${isUser ? 'border border-orange-400/20 bg-orange-400/8 text-white' : 'border border-sky-400/15 bg-white/5 text-white'}`}>
-                          {part.text}
-                        </p>
-                      );
-                    }
+                      if (part.type === 'text') {
+                        return (
+                          <p key={i} className={`sans rounded-2xl px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap ${isUser ? 'border border-orange-400/20 bg-orange-400/8 text-white' : 'border border-sky-400/15 bg-white/5 text-white'}`}>
+                            {part.text}
+                          </p>
+                        );
+                      }
 
-                    return null;
-                  })}
+                      return null;
+                    })}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
 
-          {status === 'submitted' && (
+          {!showUploadPanel && status === 'submitted' && (
             <div className="fade-up flex items-center gap-2 pl-1">
               <span className="mono text-xs text-white/60">Retrieving and generating</span>
               <span className="flex gap-1">
@@ -427,7 +443,7 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
             </div>
           )}
 
-          {error && (
+          {!showUploadPanel && error && (
             <div className="fade-up rounded-lg border border-orange-400/30 bg-orange-400/8 px-4 py-3">
               <p className="sans text-sm text-orange-300">Request failed: {error.message}</p>
             </div>
@@ -438,8 +454,8 @@ export default function ChatClient({ initialChunkCount, statusUnavailable }: { i
       {/* ---------- Input ---------- */}
       <form onSubmit={handleSubmit} className="relative z-10 border-t border-white/10 bg-black/40 px-4 py-4 backdrop-blur-sm">
         <div className="mx-auto flex max-w-2xl gap-2">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder={hasDocument ? 'Ask about your document…' : 'Upload a document to start asking questions'} className="sans flex-1 rounded-lg border border-white/15 bg-white/5 px-4 py-2.5 text-[15px] text-white transition-colors outline-none placeholder:text-white/45 focus:border-sky-400/50 disabled:cursor-not-allowed disabled:opacity-50" disabled={chatDisabled} />
-          <button type="submit" disabled={chatDisabled || !input.trim()} className="mono cursor-pointer rounded-lg border border-sky-400/30 bg-sky-400/10 px-5 py-2.5 text-sm font-medium text-sky-300 transition-all hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-sky-400/10">
+          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder={hasDocument ? 'Ask about your document…' : 'Upload a document to start asking questions'} className="sans flex-1 rounded-lg border border-white/15 bg-white/5 px-4 py-2.5 text-[15px] text-white transition-colors outline-none placeholder:text-white/45 focus:border-sky-400/50 disabled:cursor-not-allowed disabled:opacity-50" disabled={chatDisabled || showUploadPanel} />
+          <button type="submit" disabled={chatDisabled || showUploadPanel || !input.trim()} className="mono cursor-pointer rounded-lg border border-sky-400/30 bg-sky-400/10 px-5 py-2.5 text-sm font-medium text-sky-300 transition-all hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-sky-400/10">
             Send
           </button>
         </div>
