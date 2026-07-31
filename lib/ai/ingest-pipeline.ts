@@ -1,3 +1,7 @@
+// Must be imported before "pdf-parse" — registers the canvas polyfill
+// (DOMMatrix, Path2D, etc.) that pdf-parse's PDFParse constructor needs
+// in serverless/Vercel environments where these globals don't exist natively.
+import { CanvasFactory } from 'pdf-parse/worker';
 import { PDFParse } from 'pdf-parse';
 import { embed, APICallError } from 'ai';
 import { google } from '@ai-sdk/google';
@@ -54,7 +58,7 @@ export function sleep(ms: number): Promise<void> {
 // the file or receiving it from a request. This keeps the function usable
 // in both CLI and API route contexts without coupling it to the filesystem.
 export async function extractPages(buffer: Buffer): Promise<PageText[]> {
-  const parser = new PDFParse({ data: buffer });
+  const parser = new PDFParse({ data: buffer, CanvasFactory });
 
   try {
     const info = await parser.getInfo();
