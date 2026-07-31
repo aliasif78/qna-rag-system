@@ -1,20 +1,21 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
+import type { Metadata } from 'next';
+import { JetBrains_Mono, Inter } from 'next/font/google';
+import './globals.css';
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+const mono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  weight: ['400', '500', '700'],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+const sans = Inter({
+  subsets: ['latin'],
+  variable: '--font-sans',
 });
 
 export const metadata: Metadata = {
-  title: "QnA RAG System",
-  description: "A question-answering system that uses retrieval-augmented generation (RAG) to answer questions about a document.",
+  title: 'QnA RAG System',
+  description: 'A question-answering system that uses retrieval-augmented generation (RAG) to answer questions about a document.',
 };
 
 export default function RootLayout({
@@ -23,8 +24,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col" suppressHydrationWarning>
+    <html lang="en" className={`${mono.variable} ${sans.variable} h-full antialiased`}>
+      <body className="flex min-h-full flex-col" suppressHydrationWarning>
         {children}
       </body>
     </html>

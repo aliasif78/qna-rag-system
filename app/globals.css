@@ -1,5 +1,5 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 button {
-  cursor: "pointer";
+  cursor: 'pointer';
 }

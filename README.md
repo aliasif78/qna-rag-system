@@ -1,19 +1,22 @@
 # QnA RAG System
 
-A single-document, retrieval-augmented Q&A chatbot. Ask questions about one specific PDF and get answers grounded in retrieved chunks, with source citations shown per message.
+A retrieval-augmented Q&A chatbot. Each authenticated user uploads their own PDF and asks questions about it, grounded in retrieved chunks with per-message source citations.
 
-**Status: single-document proof of concept. Not multi-tenant, not evaluated against a test set, not production-hardened.** Read the Limitations section before describing this as more than that.
+**Status: functional multi-tenant proof of concept. Not load-tested, not evaluated against a retrieval quality benchmark, not hardened for production traffic.** Read Limitations before describing this as more than that — in an interview or client conversation, say exactly what's below, not more.
 
 ---
 
 ## What this actually does
 
-1. A PDF is parsed offline (`scripts/ingest.ts`), split into ~500-word chunks with 50-word overlap, embedded with Google's `gemini-embedding-001`, and stored in a Supabase `pgvector` table.
-2. At query time, the user's question is embedded (`RETRIEVAL_QUERY` task type — deliberately different from the `RETRIEVAL_DOCUMENT` type used at ingestion), and the top 3 chunks above a 0.5 cosine similarity threshold are retrieved via a Postgres RPC (`match_document_chunks`).
-3. Retrieved chunks are injected into a system prompt that instructs the model to answer only from that context, cite page numbers, and explicitly say when it doesn't know.
-4. The chunks are streamed to the client as a `data-citations` part _before_ the LLM starts generating, so the UI can show sources immediately. The answer streams in afterward via the Vercel AI SDK's `useChat`.
+1. A user signs up / signs in (Supabase Auth, email + password). Middleware (`proxy.ts`) gates `/` and `/auth` based on session state.
+2. The user uploads a PDF via `/api/upload`. The server extracts text page-by-page, strips bibliography/back-matter, chunks it (~500 words, 50-word overlap, sentence-safe), embeds each chunk with `gemini-embedding-001`, and stores it in a Supabase `pgvector` table scoped to that user's ID.
+3. Uploading a new PDF replaces the old one. This is destructive by design — one document per user, not a document library.
+4. At query time, the question is embedded (`RETRIEVAL_QUERY` task type — deliberately different from the `RETRIEVAL_DOCUMENT` type used at ingestion), and the top 5 chunks above a 0.5 cosine similarity threshold are retrieved via a Postgres RPC (`match_document_chunks`), scoped to the requesting user's own document.
+5. Retrieved chunks are injected into a system prompt instructing the model to answer only from that context, cite page numbers, avoid conflating adjacent-but-distinct values, paraphrase rather than mirror source wording, and explicitly say when the document doesn't answer the question.
+6. If nothing clears the similarity threshold, the LLM is never called — a fixed "not enough information" response is returned by code, not by prompt instruction.
+7. Chunks stream to the client as a `data-citations` part before generation starts, so sources render immediately; the answer streams in afterward via the Vercel AI SDK's `useChat`.
 
-That's the whole system. There is no agent, no tool calling, no multi-step reasoning. It is retrieval + a grounded prompt + streaming. Don't call it more than that in an interview.
+There is no agent, no tool calling, no multi-step reasoning, and no cross-document retrieval. It is auth + per-user ingestion + retrieval + a grounded prompt + streaming. Don't describe it as more than that.
 
 ---
 
@@ -22,7 +25,9 @@ That's the whole system. There is no agent, no tool calling, no multi-step reaso
 - Next.js (App Router) + TypeScript + Tailwind
 - Vercel AI SDK v5 (`streamText`, `useChat`, `DefaultChatTransport`, `createUIMessageStream`)
 - Google Gemini: `gemini-2.5-flash-lite` (generation), `gemini-embedding-001` (embeddings, 768 dimensions)
-- Supabase + pgvector (HNSW index, cosine distance)
+- Supabase: Postgres + pgvector (HNSW index, cosine similarity), Auth, RLS
+
+---
 
 ## Setup
 
@@ -39,101 +44,138 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 SUPABASE_SECRET_KEY=
 ```
 
-Run the SQL in your Supabase project to create the `document_chunks` table (HNSW index, RLS policy, unique constraint on `(document_id, chunk_index)`) and the `match_document_chunks` RPC. Both are checked into the repo as reference SQL, not migrations — there is no migration tooling here.
+`SUPABASE_SECRET_KEY` is used only by `scripts/ingest.ts` (bypasses RLS intentionally, for offline/manual ingestion). The app itself — both API routes and the browser client — uses the publishable key and goes through RLS. Never ship the secret key to the client.
 
-Ingest the document:
+### Database
 
-```bash
-npx tsx scripts/ingest.ts --file data/skeletal-muscle-growth.pdf --document-id skeletal-muscle-growth
+Run the SQL checked into the repo (reference SQL, not migrations — there is no migration tooling here) to create:
+
+- `document_chunks` — columns for `document_id`, `content`, `embedding` (vector(768)), `chunk_index`, `page_number`, `section_heading`; HNSW index on `embedding`; unique constraint on `(document_id, chunk_index)`; RLS policy scoping rows to the owning user.
+- `upload_locks` — `user_id` (PK), `started_at`. Prevents concurrent uploads for the same user from corrupting each other.
+- `match_document_chunks` RPC — cosine similarity search, parameterized by `query_embedding`, `match_document_id`, `match_count`, `match_threshold`.
+
+**Before relying on RLS as an isolation guarantee, verify `match_document_chunks`'s security mode:**
+
+```sql
+SELECT proname, prosecdef FROM pg_proc WHERE proname = 'match_document_chunks';
 ```
 
-The script is idempotent — re-running it skips chunks already present for that `document_id` by checking existing `chunk_index` values first. It does not re-embed unchanged chunks, and it does not detect content drift if you replace the PDF at the same path without changing chunk boundaries — see Limitations.
+If `prosecdef = true` (`SECURITY DEFINER`), the function runs with the privileges of its owner, not the caller — RLS does not apply inside it, and the `match_document_id` parameter passed from `/api/chat` (always derived from the authenticated session, never from client input) is the _only_ isolation boundary. If `prosecdef = false` (`SECURITY INVOKER`), RLS applies as a second layer. Know which one you have before claiming isolation is enforced.
 
-Run the app:
+### Run
 
 ```bash
 npm run dev
 ```
 
+Sign up, upload a PDF, ask questions.
+
+### CLI ingestion (optional, for manual/offline use)
+
+```bash
+npx tsx scripts/ingest.ts --file <path> --document-id <id>
+```
+
+Idempotent — checks existing `chunk_index` values for that `document_id` and skips chunks already present. Does not re-embed unchanged chunks, and does not detect content drift if you re-run against a different file under the same `document_id` — see Limitations. This path bypasses the app's own upload flow (and its lock/replace semantics) entirely; it's a lower-level tool, not an alternate front door for end users.
+
 ---
 
-## Hardcoded to one document — by design, for now
+## Architecture
 
-`app/api/chat/route.ts` hardcodes `match_document_id: "skeletal-muscle-growth"` in the RPC call. The system prompt is also written in prose specific to this document's topic ("skeletal muscle growth"), and the UI (`page.tsx`) hardcodes the header text and example prompts to match.
+```
+proxy.ts (middleware)
+  → getUser() [validates JWT server-side, NOT a cookie read]
+  → unauth'd + "/"     → redirect "/auth"
+  → auth'd + "/auth"   → redirect "/"
 
-This means: **ingesting a second document does nothing for this app as it stands.** The RPC will simply never be asked about it. This was a deliberate scope decision to finish the single-document pipeline correctly before generalizing — multi-document/multi-tenant retrieval, with `document_id` as a request parameter instead of a literal, is a Week 6 concern (metadata filtering, multi-tenant isolation) and is intentionally not built yet.
+app/page.tsx (Server Component)
+  → re-checks getUser() independently of middleware
+  → head-count query on document_chunks scoped to user.id
+  → passes { initialChunkCount, statusUnavailable } to ChatClient
 
-If asked in an interview "does this support multiple documents" — the honest answer is no, and here's what would need to change: `document_id` becomes a parameter passed from the client (or resolved from a document-selection UI), the system prompt becomes templated rather than hardcoded prose, and there needs to be a mechanism (RLS policy, most likely) enforcing that a user can only query documents they have access to.
+components/chat-client.tsx (Client Component)
+  → upload flow → POST /api/upload
+  → chat flow   → useChat → POST /api/chat (streamed)
+  → client-side session watchdog (UX only — not a security boundary)
+
+app/api/upload/route.ts
+  → auth (getUser)
+  → acquire upload_locks row (CAS steal for stale locks)
+  → extractPages → stripBackMatter → splitIntoParagraphs → chunkParagraphs
+  → validate chunks non-empty BEFORE deleting old document
+  → delete existing document_chunks for user → embed + insert new chunks
+  → release lock (finally block, every exit path)
+
+app/api/chat/route.ts
+  → auth (getUser)
+  → documentId = user.id
+  → embedQuery(userText) → match_document_chunks RPC
+  → 0 chunks  → hard-coded refusal, no LLM call
+  → >0 chunks → build system prompt, streamText, stream response
+
+lib/ai/ingest-pipeline.ts   — shared chunking/embedding logic (upload route + CLI script)
+lib/ai/embed-query.ts       — query-side embedding (RETRIEVAL_QUERY)
+lib/supabase/{client,server}.ts — browser vs. server Supabase clients (publishable key, RLS-bound)
+```
 
 ---
 
 ## Chunking strategy
 
-Paragraph-first, sentence-safe, word-count-target chunking (`scripts/ingest.ts`):
+Paragraph-first, sentence-safe, word-count-target chunking (`lib/ai/ingest-pipeline.ts`):
 
-- Pages are split into paragraphs on double-newlines or long whitespace gaps.
-- A lightweight heuristic flags likely headings (`< 80 chars`, no terminal punctuation, `≤ 10` words) and attaches the most recent heading as chunk metadata (`section_heading`).
-- Content accumulates word-by-word; once a chunk hits ~500 words, it flushes with a 50-word overlap carried into the next chunk.
-- Critically, the flush check happens at **sentence** granularity, not paragraph granularity. This document's two-column academic PDF layout doesn't survive extraction with clean paragraph breaks — `pdf-parse` merges what should be several paragraphs into one blob. Checking after every sentence instead of every paragraph bounds the overshoot to about one sentence's length instead of blowing 700–1200 words past target, which is what happened before this fix.
-- A hard backstop (`MAX_SENTENCE_WORDS = 150`) force-splits any single "sentence" longer than that into fixed word windows, for extraction garbage with no usable punctuation at all.
+- Pages are extracted individually (`pdf-parse`, page-aware) so every chunk retains a real page number.
+- A back-matter detector removes References/Bibliography sections at raw line granularity — this PDF format extracts as single-newline-separated lines, not blank-line-separated paragraphs, so paragraph-level heading detection silently misses the "References" boundary. Left in, citation-dense bibliography text scores competitively (sometimes higher) than body prose in cosine similarity and gets paraphrased as if it were a finding.
+- A lightweight heuristic flags likely headings (short, no terminal punctuation, few words) and attaches the most recent heading as chunk metadata (`section_heading`).
+- Content accumulates word-by-word; at ~500 words it flushes with a 50-word overlap carried into the next chunk.
+- The flush check runs at **sentence** granularity, not paragraph granularity, because this PDF's multi-column layout merges what should be several paragraphs into one extracted blob. Checking after every sentence bounds chunk overshoot to about one sentence instead of 700–1200 words past target.
+- A hard backstop (`MAX_SENTENCE_WORDS = 150`) force-splits any "sentence" longer than that into fixed word windows, for extraction garbage with no usable punctuation.
 
-### What this chunking strategy does NOT handle
+### What this chunking strategy does not handle
 
-Be honest about these if asked, because they will surface the moment a different PDF is ingested:
-
-- **Tables**: extracted as word soup with no structural markers. Will be chunked as if it were prose, mid-row.
-- **Repeated headers/footers**: a running header or page footer that repeats on every page gets extracted as a "paragraph" every single page and pollutes multiple chunks with duplicate junk text.
-- **Heading detection is a heuristic, not a real classifier**: it will misfire in both directions — short sentences without terminal punctuation get flagged as headings; genuine headings with a colon (`Results:`) don't. `section_heading` metadata quality is unreliable, not verified.
-- **Multi-column reading order is not fixed, only the overshoot is**: if the PDF parser extracts column A fully then column B fully, chunk-to-chunk narrative order can be scrambled even though the overshoot bug is resolved. Not tested against a document where this actually occurs.
-- **No reference/bibliography detection**: a citation-heavy document will have its reference list chunked and embedded like body content, which can pollute retrieval.
-
-This chunker was validated against exactly one PDF (32 pages, single/near-single column, prose-heavy). It has not been stress-tested against tables, multi-column layouts, or scanned/image PDFs. "Generic" is not a claim this code can currently support.
+- **Tables** extract as word soup with no structural markers and get chunked as prose, mid-row.
+- **Figures/captions** are not distinguished from body text.
+- Chunking is tuned against one PDF's layout quirks (two-column academic format). A structurally different PDF (single-column, heavy tabular data, scanned images) will expose different failure modes and has not been tested against this pipeline.
 
 ---
 
-## What's verified vs. what's assumed
+## Hardcoded / scoped-out decisions — by design, for now
 
-**Verified** (via direct SQL against Supabase, not assumed from ingestion logs):
-
-- Row count matches expected chunk count (28/28)
-- No gaps in `chunk_index` sequence
-- Embedding dimension is 768 on every row
-- Spot-checked chunk content against source PDF pages
-
-**Not yet done:**
-
-- No formal retrieval evaluation. There is no test set of known-answer questions run against this pipeline and scored. "It answered my test questions correctly a few times" is not evaluation — precision/recall/faithfulness measurement is a Week 6 topic and hasn't started.
-- No adversarial testing — hasn't been deliberately asked questions with no answer in the document to confirm the refusal path holds up under variation, beyond basic manual spot checks.
-- No load or concurrency testing.
-- No check for whether the 0.5 similarity threshold is actually the right cutoff for this embedding model and this document — it's an assumed default, not a tuned value.
-
-If a client or interviewer asks "how do you know this works," the honest answer right now is: manual spot-checking, not measurement. Say that plainly, don't imply more rigor than exists.
+- **One document per user.** Uploading replaces the previous document's chunks entirely. There is no document library, no versioning, no ability to keep multiple documents and switch between them. If asked "does this support multiple documents per user" — no, and the change required is a real `document_id` column decoupled from `user_id`, a document-selection UI, and RLS policies keyed on document ownership rather than the user ID directly.
+- **No hybrid search, no reranking.** Retrieval is pure cosine similarity, top-5, single threshold. If the best-matching embedding isn't the best answer, there is no second pass to catch it.
+- **Thresholds are unvalidated.** `RETRIEVAL_THRESHOLD = 0.5` and `CONFIDENCE_THRESHOLD = 0.65` are starting points, not values tuned against a labeled eval set. In a small, topically uniform corpus, in-domain unanswerable questions and real answers can cluster in the same similarity band — the confidence gate reliably catches cross-domain rejection but cannot reliably distinguish in-domain gaps from genuine answers. That's a generation-layer instruction backstop, not a code-level guarantee, and it should be described as such.
 
 ---
 
 ## Reliability behavior that IS implemented
 
-- **Retrieval fails before the stream opens, not during it.** Embedding the query and calling the retrieval RPC both happen before `createUIMessageStream` is invoked. If either fails, the route returns a normal HTTP error (429, 500, 503) instead of corrupting an in-progress stream. This is a real production concern, not a hypothetical — mid-stream failures leave the client in an unrecoverable UI state.
-- **429 errors are classified, not treated uniformly.** `embed-query.ts` and `ingest.ts` both distinguish quota-exhaustion 429s (retrying is pointless until midnight Pacific reset) from rate-limit 429s (retryable with backoff) by inspecting the response body. Retrying a quota-exhausted request is a wasted call and, at scale, a wasted cost.
-- **`maxRetries: 0` is set explicitly on every `embed()` call.** The AI SDK has its own internal retry logic; without disabling it, a custom retry loop and the SDK's retry loop stack and silently multiply the number of API calls made per failure. This was an actual bug caught during ingestion, not a defensive habit copied from a tutorial.
-- **Ingestion is resumable.** `getExistingChunkIndices()` checks what's already in the table before embedding, so a failed or interrupted ingestion run can be re-run without re-embedding (and re-paying for) chunks that already succeeded.
+- **Retrieval fails before the stream opens, not during it.** Query embedding and the retrieval RPC both run before `createUIMessageStream` is invoked in `/api/chat`. A failure returns a normal HTTP error (429/500/503) instead of corrupting an in-progress stream — a real production concern, not hypothetical, since a mid-stream failure leaves the client UI in an unrecoverable state.
+- **429s are classified, not treated uniformly.** Both `embed-query.ts` and `ingest-pipeline.ts` distinguish quota-exhaustion 429s (retrying is pointless until quota resets) from rate-limit 429s (retryable with backoff) by inspecting the response body.
+- **`maxRetries: 0` is set explicitly on every `embed()` call.** The AI SDK has its own internal retry logic; without disabling it, a custom retry loop and the SDK's retry loop stack multiply the number of calls made per failure silently.
+- **Ingestion is resumable.** The CLI script checks existing `chunk_index` values before embedding, so an interrupted run doesn't re-embed (and re-pay for) chunks that already succeeded.
+- **Upload concurrency is guarded.** `upload_locks` prevents two concurrent uploads for the same user from corrupting each other, with a compare-and-swap steal mechanism for locks left stale by a killed serverless function (threshold set above the route's own `maxDuration` plus round-trip margin, so a legitimately still-running upload can't have its lock stolen out from under it).
+- **Upload ordering avoids the worst failure mode, not all of them.** Extraction/chunking runs and is validated non-empty _before_ the old document is deleted — a bad upload no longer destroys a working document. It does not eliminate a narrower failure: the embed-and-insert loop can still fail partway through _after_ the delete, leaving a degraded document (old data gone, new data incomplete). Documented, not solved — the real fix is ingest-to-a-new-ID with an atomic swap, or a Postgres transaction via RPC.
 
 ## Reliability behavior that is NOT implemented
 
 - No caching of embeddings or repeated query results.
-- No rate limiting on the `/api/chat` route itself — nothing stops a client from hammering it and running up the Gemini bill. Free tier makes this low-stakes right now; it would not be acceptable with a real user base.
-- No hybrid search (vector + full-text) and no reranking — retrieval is pure cosine similarity, top-3, single threshold. If the top embedding match isn't the best answer, there's no second pass to catch that.
-- No observability — no structured logging of retrieval quality, latency, or per-request cost. If this were failing for real users, there's currently no way to see it happening.
-- No multi-tenant isolation, because there's only one document and no user-scoping at all yet.
+- No rate limiting on `/api/chat` or `/api/upload` — nothing stops a client from hammering either and running up the Gemini bill. Low-stakes on free tier; not acceptable with real users.
+- No observability — no structured logging of retrieval quality, latency, or per-request cost. If this were failing for real users right now, there is no way to see it happening.
+- No async job processing for uploads. `/api/upload` is a single synchronous request capped at `maxDuration = 60`; a large document with rate-limit backoff mid-ingestion can time out. Real fix is background job processing or batched parallel embedding (the latter trades timeout risk for harder rate-limit pressure).
+- No load or concurrency testing beyond the single-user upload lock.
+- No automated retrieval quality evaluation. Confidence in the 0.5/0.65 thresholds is manual spot-checking, not measurement — say that plainly if asked how you know this works.
 
 ---
 
-## Known open issue (unrelated to this project)
+## Security notes
 
-A corrupted row from an earlier (Week 4) exercise still exists in a separate Supabase project — the source file was deleted but the database row was not cleaned up. Not part of this project's data, but flagged here as an open item, not swept under the rug.
+- All auth checks use `getUser()`, never `getSession()`, in every place a request is authorized (middleware, page, both API routes). `getSession()` only decodes the session cookie without validating it against Supabase's auth server; a replayed or tampered token would pass silently. `getUser()` round-trips to verify the token every time.
+- Client-side password strength rules in `app/auth/page.tsx` are UX only — they gate a button, nothing more. A request sent directly to Supabase's REST API bypasses them entirely. The actual enforcement boundary is Supabase Auth's server-side password policy (Dashboard → Authentication → Policies); verify it's configured before claiming password requirements are enforced.
+- Client-side file type/size checks on upload are a UX fast-path, not a security control — trivially bypassed. The server-side checks in `/api/upload` are the real gate, and even those trust the client-supplied MIME type for fast rejection rather than sniffing magic bytes; MIME type is spoofable.
+- `document_id` in `/api/chat` is always derived from the verified session (`user.id`), never accepted from the request body — a client cannot address another user's document by forging a parameter. See the RLS/`SECURITY DEFINER` verification note under Setup for what actually enforces that at the database layer.
 
 ---
 
-## Honest one-line summary
+## Known open issues
 
-This is a correctly-scoped, single-document RAG pipeline with real attention paid to failure modes around streaming, retries, and idempotent ingestion — that part is defensible. It is not evaluated, not multi-document, not load-tested, and the chunking strategy is proven on exactly one document layout. Present it as "Week 5 of a RAG curriculum, working single-doc pipeline, evaluation and multi-tenancy are the next milestones" — not as a finished production RAG system.
+- The upload path's partial-failure window (embed loop fails after delete) remains unresolved — see Reliability above.
