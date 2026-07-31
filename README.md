@@ -178,5 +178,4 @@ Paragraph-first, sentence-safe, word-count-target chunking (`lib/ai/ingest-pipel
 
 ## Known open issues
 
-- A corrupted row from an earlier (Week 4) exercise exists in a separate Supabase project — source file was deleted but the database row was not cleaned up. Unrelated to this project's data; flagged here as an open item rather than swept under the rug.
 - The upload path's partial-failure window (embed loop fails after delete) remains unresolved — see Reliability above.
