@@ -24,7 +24,7 @@ There is no agent, no tool calling, no multi-step reasoning, and no cross-docume
 
 - Next.js (App Router) + TypeScript + Tailwind
 - Vercel AI SDK v5 (`streamText`, `useChat`, `DefaultChatTransport`, `createUIMessageStream`)
-- Google Gemini: `gemini-2.5-flash-lite` (generation), `gemini-embedding-001` (embeddings, 768 dimensions)
+- Google Gemini: `gemini-3.5-flash-lite` (generation), `gemini-embedding-001` (embeddings, 768 dimensions)
 - Supabase: Postgres + pgvector (HNSW index, cosine similarity), Auth, RLS
 
 ---
